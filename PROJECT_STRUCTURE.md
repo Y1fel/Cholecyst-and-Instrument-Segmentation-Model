@@ -13,6 +13,7 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │  │  ├─ cholec80.yaml               # Cholec80数据集路径与参数
 │  │  └─ endovis.yaml                # EndoVis数据集路径与参数
 │  ├─ offline/                        # 离线阶段（重模型训练）参数
+│  │  ├─ baseline_min.yaml           # 极简配置（可选，不想配也可用命令行）
 │  │  ├─ unetpp_deeplabv3.yaml       # U-Net++和DeepLabV3配置
 │  │  └─ hrnet.yaml                  # HRNet配置
 │  ├─ online/                         # 在线阶段（轻量模型与自适应）参数
@@ -69,8 +70,13 @@ Cholecyst-and-Instrument-Segmentation-Model/
 └─ src/                               # 核心源代码
    ├─ common/                        # 公共工具
    ├─ dataio/                        # 数据加载与预处理
+   │  └─ datasets/                   # 数据集类
+   │     └─ seg_dataset_min.py       # 最小数据集类（images/、masks/）
    ├─ models/                        # 模型结构
+   │  └─ baseline/                   # 基线模型
+   │     └─ unet_min.py              # 最小 U-Net
    ├─ training/                      # 训练流程
+   │  └─ train_offline_min.py        # 只训练1个epoch并保存
    ├─ online/                        # 在线推理与自适应
    ├─ metrics/                       # 评价指标
    └─ viz/                          # 可视化工具

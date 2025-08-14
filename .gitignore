@@ -205,3 +205,34 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- datasets & large artifacts ---
+data/
+!data/README.md
+!data/.gitkeep
+
+checkpoints/
+logs/
+outputs/
+
+# 模型/权重/导出产物
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.npy
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Docker 产物（如有）
+*.tar
