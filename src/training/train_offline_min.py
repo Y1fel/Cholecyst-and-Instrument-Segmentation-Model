@@ -7,7 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
-from src.models.baseline.unet_min import UNetMin  # 你已经在看这个文件了
+from src.models.baseline.unet_min import UNetMin
 
 #参数配置
 def parse_args():
