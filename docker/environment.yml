@@ -1,0 +1,40 @@
+name: tti-seg-py310
+channels:
+	- pytorch
+	- nvidia   # 如果使用 GPU + CUDA 11.8 (根据实际驱动可调整)
+	- conda-forge
+	- defaults
+dependencies:
+	- python=3.10
+	- pip
+	# --- Core Numerical ---
+	- numpy
+	- scipy
+	- pillow
+	# --- Computer Vision / IO ---
+	- opencv
+	# --- PyTorch (选择匹配你本地 CUDA 版本的 build) ---
+	- pytorch
+	- torchvision
+	- torchaudio
+	- pytorch-cuda=11.8  # 若仅 CPU 环境，请删除此行，并改用 cpuonly
+	# - cpuonly            # <- 如果是 CPU 训练，把上面的 pytorch-cuda 行注释并取消此行注释
+	# --- Utilities ---
+	- pyyaml
+	- tqdm
+	- pip:
+			- pynvml          # GPU 监控 (pip 版更常见)
+			- kagglehub       # seg8k_fetch.py 中引用
+			# 可选扩展：日志 / 可视化 / 加速
+			- rich            # 终端美化 (可选)
+			- tensorboard     # 训练日志 (可选)
+			- matplotlib      # 简单可视化 (可选)
+			- scikit-image    # 图像处理 (可选)
+			- albumentations  # 数据增强 (可选)
+
+# 使用说明：
+# 1. conda env create -f docker/environment.yml
+# 2. conda activate tti-seg-py310
+# 3. pip install -e .
+# 4. python scripts/seg8k_fetch.py --strategy move
+# 5. python -m scripts.train_offline_with_progress --data_root "data/seg8k" --img_size 512 --batch_size 6 --epochs 1 --lr 3e-4 --num_classes 2 --save_path "checkpoints/baseline_offline_min.pth"
