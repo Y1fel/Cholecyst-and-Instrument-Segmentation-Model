@@ -184,7 +184,7 @@ def main():
     
     # 设置数据加载器
     train_loader, val_loader, dataset_info = setup_data_loaders(args)
-    print(f"📁 Dataset: Train={dataset_info['train_size']}, Val={dataset_info['val_size']}")
+    print(f"Dataset: Train={dataset_info['train_size']}, Val={dataset_info['val_size']}")
     
     # 设置模型和损失函数
     model, criterion = setup_model_and_criterion(args, device)
@@ -193,7 +193,7 @@ def main():
     # 训练状态跟踪
     best_val_loss = float("inf")
     
-    print(f"🎯 Starting training for {args.epochs} epochs...")
+    print(f"Starting training for {args.epochs} epochs...")
     print("=" * 80)
     
     # 训练循环
@@ -204,7 +204,7 @@ def main():
         )
         
         # 验证阶段
-        print(f"\n🔍 Validation for epoch {epoch + 1}...")
+        print(f"\nValidation for epoch {epoch + 1}...")
         val_metrics = validate_model(model, val_loader, criterion, device)
         
         # 组合指标
@@ -222,26 +222,26 @@ def main():
         if val_metrics['val_loss'] < best_val_loss:
             best_val_loss = val_metrics['val_loss']
             output_mgr.save_model(model, epoch + 1, val_metrics)
-            print(f"✅ Saved best model at epoch {epoch + 1} with val_loss {val_metrics['val_loss']:.4f}")
+            print(f"Saved best model at epoch {epoch + 1} with val_loss {val_metrics['val_loss']:.4f}")
         
         # 保存可视化结果（可选）
         if args.save_viz and (epoch + 1) % max(1, args.epochs // 3) == 0:
-            print(f"🎨 Saving visualizations for epoch {epoch + 1}...")
+            print(f"Saving visualizations for epoch {epoch + 1}...")
             viz_dir = os.path.join(output_mgr.get_vis_dir(), f"epoch_{epoch + 1:03d}")
             save_visualizations(model, val_loader, viz_dir, args, device)
     
     # 训练完成总结
     summary = output_mgr.get_run_summary()
     print("\n" + "=" * 80)
-    print("🎉 Training Completed!")
-    print(f"📂 Results saved to: {summary['run_dir']}")
-    print(f"📈 Best validation metrics:")
-    print(f"   Loss: {best_val_loss:.4f}")
-    print(f"⏱️  Total training time: {monitor.get_elapsed_time()}")
+    print("Training Completed!")
+    print(f"Results saved to: {summary['run_dir']}")
+    print(f"Best validation metrics:")
+    print(f"Loss: {best_val_loss:.4f}")
+    print(f"Total training time: {monitor.get_elapsed_time()}")
     
     # 最终可视化保存
     if args.save_viz:
-        print("🎨 Saving final visualizations...")
+        print("Saving final visualizations...")
         final_viz_dir = output_mgr.get_vis_dir()
         save_visualizations(model, val_loader, final_viz_dir, args, device)
 

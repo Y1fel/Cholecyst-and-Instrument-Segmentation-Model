@@ -1,4 +1,3 @@
-# 
 import os
 import torch
 import numpy as np
@@ -105,17 +104,17 @@ class Visualizer:
                 probs  = torch.sigmoid(logits)
                 
                 if batch_idx == 0:  # print debug info only at the first batch
-                    print(f"🔍 Debug Info:")
-                    print(f"  Logits - min: {logits.min():.4f}, max: {logits.max():.4f}, mean: {logits.mean():.4f}")
-                    print(f"  Probs  - min: {probs.min():.4f}, max: {probs.max():.4f}, mean: {probs.mean():.4f}")
-                    print(f"  GT mask unique values: {torch.unique(masks)}")
+                    print(f"Debug Info:")
+                    print(f"Logits - min: {logits.min():.4f}, max: {logits.max():.4f}, mean: {logits.mean():.4f}")
+                    print(f"Probs  - min: {probs.min():.4f}, max: {probs.max():.4f}, mean: {probs.mean():.4f}")
+                    print(f"GT mask unique values: {torch.unique(masks)}")
 
                 preds  = (probs > threshold).float()
 
-                # 🆕 检查预测效果
+                #检查预测效果
                 pred_ratio = preds.mean().item()
                 if batch_idx == 0:
-                    print(f"  预测前景比例: {pred_ratio:.3f}")
+                    print(f"预测前景比例: {pred_ratio:.3f}")
                     
                 # check predicted result
                 pred_positive_ratio = (preds > 0).float().mean()
@@ -218,7 +217,7 @@ class Visualizer:
         save_dir: str,
         max_samples: int = 10,
         device: str = "cuda",
-        threshold: float = 0.5  # 🆕 可调节阈值
+        threshold: float = 0.5  #可调节阈值
     ):
         """
         保存对比预测结果（包含三面板对比图）
@@ -243,10 +242,10 @@ class Visualizer:
                 logits = model(images)
                 probs = torch.sigmoid(logits)
                 
-                # 🆕 使用可调节阈值
+                #使用可调节阈值
                 preds = (probs > threshold).float()
                 
-                # 🆕 添加调试信息
+                #添加调试信息
                 print(f"Batch {batch_idx}: Logits range [{logits.min():.4f}, {logits.max():.4f}]")
                 print(f"Batch {batch_idx}: Probs range [{probs.min():.4f}, {probs.max():.4f}]")
                 print(f"Batch {batch_idx}: Pred unique values: {torch.unique(preds)}")
