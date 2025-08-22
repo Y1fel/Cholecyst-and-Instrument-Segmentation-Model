@@ -171,8 +171,8 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    print(f"🚀 Starting training with device: {device}")
-    print(f"📊 Model type: {args.model_type}")
+    print(f"Starting training with device: {device}")
+    print(f"Model type: {args.model_type}")
     
     # 初始化监控器
     monitor = TrainMonitor(enable_gpu_monitor=args.enable_gpu_monitor)
