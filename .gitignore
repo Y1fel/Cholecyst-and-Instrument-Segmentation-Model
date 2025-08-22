@@ -236,3 +236,4 @@ __pycache__/
 
 # Docker 产物（如有）
 *.tar
+improved_training_config.py

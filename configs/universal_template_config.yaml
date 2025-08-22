@@ -1,0 +1,30 @@
+# Universal Training Template Configuration
+# 通用训练模板配置文件
+
+# 基础训练参数
+model_type: "universal_unet"
+epochs: 10
+batch_size: 8
+lr: 3e-4
+num_classes: 2
+
+# 数据参数
+img_size: 512
+val_ratio: 0.2
+num_workers: 4
+
+# 监控和可视化参数
+monitor_interval: 5        # 每5个batch更新一次进度
+enable_gpu_monitor: true   # 启用GPU监控
+save_viz: true            # 保存可视化结果
+viz_samples: 30           # 可视化样本数量
+
+# 高级选项
+debug: false
+save_best_only: true
+
+# 模型特定参数（可根据不同模型调整）
+model_params:
+  in_channels: 3
+  base_filters: 32
+  dropout: 0.1

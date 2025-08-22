@@ -39,10 +39,10 @@ class Up(nn.Module):
     def forward(self, x, x_skip):
         x = self.up(x)
         # shape align
-        diffY = x_skip.size(2) - x.size(2)
-        diffX = x_skip.size(3) - x.size(3)
+        diffY = x_skip.size(2) - x.size(2)  # 高度之差（期望把 x pad 到和 skip 一样大）
+        diffX = x_skip.size(3) - x.size(3)  # 宽度之差
         x = F.pad(x, [diffX // 2, diffX - diffX // 2,
-                      diffY // 2, diffY - diffY // 2])
+                      diffY // 2, diffY - diffY // 2])  # [L, R, T, B]
         x = torch.cat([x_skip, x], dim=1)  # 拼接
         return self.conv(x)
     

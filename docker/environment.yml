@@ -26,11 +26,12 @@ dependencies:
 			- pynvml          # GPU 监控 (pip 版更常见)
 			- kagglehub       # seg8k_fetch.py 中引用
 			# 可选扩展：日志 / 可视化 / 加速
-			- rich            # 终端美化 (可选)
-			- tensorboard     # 训练日志 (可选)
-			- matplotlib      # 简单可视化 (可选)
-			- scikit-image    # 图像处理 (可选)
-			- albumentations  # 数据增强 (可选)
+			- rich            # 终端美化
+			- tensorboard     # 训练日志
+			- matplotlib      # 简单可视化
+			- scikit-image    # 图像处理
+			- albumentations  # 数据增强
+			- psutil          # 系统监控
 
 # 使用说明：
 # 1. conda env create -f docker/environment.yml
