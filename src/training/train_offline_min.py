@@ -150,6 +150,18 @@ def main():
 
     # Save visualizations results
     if args.save_viz:
+        print("Loading Best Model for Visualization")
+
+        # checkpoint with best performance
+        best_model_path = output_mgr.get_best_model_path()
+        if best_model_path and os.path.exists(best_model_path):
+            print(f"Best model found: {best_model_path}")
+            current_checkpoint = torch.load(best_model_path, map_location=device)
+            model.load_state_dict(current_checkpoint['model_state_dict'])
+            print(f"Best model loaded: {best_model_path}")
+        else:
+            print(f"Best model file not found: {best_model_path}, using latest")
+
         print("-- Visualizations Saving --")
         visualizer = Visualizer()
         viz_dir = output_mgr.get_vis_dir()
@@ -158,15 +170,16 @@ def main():
             model,
             val_loader,
             viz_dir,
-            max_samples=50,
-            device=device
+            max_samples = 50,
+            device = device
         )
         
         visualizer.save_basic_predictions(
             model,
             val_loader,
             viz_dir,
-            max_samples = 50
+            max_samples = 50,
+            device = device
         )
 
     # Print summary

@@ -96,7 +96,77 @@ class OutputManager:
             }
         }
 
-    # 预留扩展接口
+    # get checkpoint with best performance
+    def get_best_model_path(self) -> str:
+        checkpoints_dir = self.get_checkpoints_dir()
+        csv_path = self.get_metrics_csv_path()
+
+        if not os.path.exists(checkpoints_dir) or not os.path.exists(csv_path):
+            return ""
+
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+
+            if df.empty:
+                return ""
+            
+            # by val_loss find the best epoch
+            if 'val_loss' in df.columns:
+                best_epoch = df.loc[df['val_loss'].idxmin(), 'epoch']
+                print(f"Best epoch by validation loss: {best_epoch} with val_loss: {df['val_loss'].min():.4f}")
+            elif 'iou' in df.columns:
+                best_epoch = df.loc[df['iou'].idxmax(), 'epoch']
+                print(f"Best epoch by IoU: {best_epoch} with IoU: {df['iou'].max():.4f}")
+            else:
+                best_epoch = df['epoch'].max()
+                print(f"No specific metric found, using latest epoch: {best_epoch}")
+
+            model_fname = f"{self.model_type}_epoch_{best_epoch:03d}.pth"
+            model_path  = os.path.join(checkpoints_dir, model_fname)
+
+            if os.path.exists(model_path):
+                print(f"Best model found: {model_path}")
+                return model_path
+            else:
+                print(f"Best model file not found: {model_path}, using latest")
+                return self._get_latest_checkpoint()  # Fallback to latest checkpoint
+        
+        except Exception as e:
+            print(f"Error occurred while getting best model path: {e}, using latest")
+            return self._get_latest_checkpoint()  # Fallback to latest checkpoint
+
+    # get latest checkpoint
+    def _get_latest_checkpoint(self) -> str:
+        # get path
+        checkpoints_dir = self.get_checkpoints_dir()
+
+        # locate all ck files
+        if os.path.exists(checkpoints_dir):
+            checkpoints = [f for f in os.listdir(checkpoints_dir) if f.endswith(".pth")]
+            # retrive latest model
+            latest = max(checkpoints, key = lambda x: os.path.getctime(os.path.join(checkpoints_dir, x)))
+            return os.path.join(checkpoints_dir, latest)
+
+        return ""
+
+    # gain metrics history
+    def get_metrics_history(self) -> list:
+        # get csv path
+        csv_path = self.get_metrics_csv_path()
+        if not os.path.exists(csv_path):
+            return []
+        
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            return df.to_dict('records')  # convert to list of dicts
+        except Exception as e:
+            print(f"Error reading metrics CSV: {e}")
+            return []
+        
+
+# ---------- 预留扩展接口 ---------- 
     def save_advanced_checkpoint(self, model, optimizer, scheduler, **kwargs):
         """预留接口：保存完整检查点"""
         # TODO: 未来实现完整的检查点保存（包含优化器、调度器等）

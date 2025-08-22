@@ -25,7 +25,7 @@ dependencies:
 	- pip:
 			- pynvml          # GPU 监控 (pip 版更常见)
 			- kagglehub       # seg8k_fetch.py 中引用
-			# 可选扩展：日志 / 可视化 / 加速
+			- pandas          # 数据处理
 			- rich            # 终端美化
 			- tensorboard     # 训练日志
 			- matplotlib      # 简单可视化
