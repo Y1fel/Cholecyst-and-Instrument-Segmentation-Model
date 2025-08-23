@@ -9,6 +9,8 @@ class TrainMonitor:
     def __init__(self, enable_gpu_monitor: bool = True):
         self.enable_gpu_monitor = enable_gpu_monitor
         self.start_time = None
+        self.epoch_times = []  # 记录每个epoch的时间
+        self.batch_times = []  # 记录batch时间用于计算ETA
         
         # 尝试导入GPU监控库
         self.gpu_available = False
@@ -62,6 +64,31 @@ class TrainMonitor:
         seconds = int(elapsed % 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     
+    def calculate_eta(self, current_epoch: int, total_epochs: int, current_batch: int, total_batches: int) -> str:
+        """计算剩余时间ETA"""
+        if self.start_time is None:
+            return "00:00:00"
+        
+        elapsed = time.time() - self.start_time
+        
+        # 计算总进度 (基于epoch和batch)
+        total_progress = ((current_epoch - 1) * total_batches + current_batch) / (total_epochs * total_batches)
+        
+        if total_progress <= 0:
+            return "00:00:00"
+        
+        # 估算总时间和剩余时间
+        estimated_total_time = elapsed / total_progress
+        remaining_time = estimated_total_time - elapsed
+        
+        if remaining_time < 0:
+            remaining_time = 0
+        
+        hours = int(remaining_time // 3600)
+        minutes = int((remaining_time % 3600) // 60)
+        seconds = int(remaining_time % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
     def print_progress(self, 
                       epoch: int, 
                       total_epochs: int,
@@ -87,9 +114,10 @@ class TrainMonitor:
         
         # 添加时间信息
         time_str = f"Time: {self.get_elapsed_time()}"
+        eta_str = f"ETA: {self.calculate_eta(epoch, total_epochs, batch, total_batches)}"
         
         # 组合完整信息
-        full_str = f"{progress_str} | {metrics_str} | {system_str} | {time_str}"
+        full_str = f"{progress_str} | {metrics_str} | {system_str} | {time_str} | {eta_str}"
         
         if refresh:
             # 单行刷新

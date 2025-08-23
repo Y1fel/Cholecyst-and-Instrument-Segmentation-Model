@@ -82,7 +82,7 @@ def main():
 
     # Model and optimizer
     out_ch = 1 if args.num_classes == 2 else args.num_classes
-    model = UNetMin(in_ch=3, num_classes=out_ch, base=32).to(device)
+    model = UNetMin(in_ch=3, num_classes=out_ch, base=64).to(device)
     criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
