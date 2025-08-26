@@ -51,6 +51,7 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │
 ├─ scripts/                           # ✅ 命令行脚本（可复现运行）
 │  ├─ seg8k_fetch.py                 # ✅ 数据集下载脚本
+│  ├─ demo_multiclass_color.py       # ✅ 多类分割可视化演示脚本
 │  ├─ train_monitor.py               # ✅ 训练监控模块（已移至src/common/）
 │  ├─ train_offline.sh               # 📋 离线训练入口
 │  ├─ distill.sh                     # 📋 重→轻蒸馏
@@ -75,23 +76,27 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │  ├─ test_rollback.py               # 📋 回滚机制测试
 │  └─ test_pseudo_labels.py          # 📋 伪标签生成测试
 │
-└─ src/                               # ✅ 核心源代码
+├─ src/                               # ✅ 核心源代码
    ├─ common/                        # ✅ 公共工具
+   │  ├─ constants.py                # ✅ 全局常量定义（CLASSES、PALETTE、IGNORE_INDEX）
    │  ├─ output_manager.py           # ✅ 输出目录管理和结果保存
-   │  └─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条）
+   │  └─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条、ETA预估）
    ├─ dataio/                        # ✅ 数据加载与预处理
    │  └─ datasets/                   # ✅ 数据集类
    │     └─ seg_dataset_min.py       # ✅ 最小数据集类（images/、masks/）
    ├─ models/                        # ✅ 模型结构
-   │  └─ baseline/                   # ✅ 基线模型
-   │     └─ unet_min.py              # ✅ 最小 U-Net
+   │  ├─ baseline/                   # ✅ 基线模型
+   │  │  └─ unet_min.py              # ✅ 最小 U-Net
+   │  └─ online/                     # ✅ 在线/轻量模型
+   │     └─ mobile_unet.py           # ✅ MobileNet风格的轻量U-Net（深度可分离卷积）
    ├─ training/                      # ✅ 训练流程
    │  ├─ train_offline_min.py        # ✅ 最小离线训练（1个epoch测试）+ 🔄 可集成监控
    │  └─ train_universal_template.py # ✅ 通用训练模板（集成监控、可视化、评估）
-   ├─ online/                        # 🚧 在线推理与自适应（预留目录）
-   ├─ metrics/                       # ✅ 评价指标
+   ├─ eval/                          # ✅ 评估模块
    │  └─ evaluator.py                # ✅ 分割指标评估器（IoU、Dice、Accuracy等）
+   ├─ online/                        # 🚧 在线推理与自适应（预留目录）
    └─ viz/                          # ✅ 可视化工具
+      ├─ colorize.py                 # ✅ 颜色映射和可视化函数（id_to_color、make_triplet、overlay）
       └─ visualizer.py               # ✅ 可视化器（预测结果、叠加图像）
 ```
 
@@ -111,8 +116,9 @@ Cholecyst-and-Instrument-Segmentation-Model/
 - **特点**:
   - 单行刷新进度显示
   - CPU/GPU资源监控
-  - 训练时间统计
+  - 训练时间统计和ETA剩余时间预估
   - Epoch总结报告
+  - 智能进度算法（基于已完成batch和epoch计算剩余时间）
 - **集成**: 可直接集成到现有训练脚本中，包括`train_offline_min.py`
 
 ### 🆕 输出管理器 (`src/common/output_manager.py`)
@@ -123,15 +129,48 @@ Cholecyst-and-Instrument-Segmentation-Model/
   - 模型检查点管理
   - 配置文件保存
 
-### 🆕 评估器 (`src/metrics/evaluator.py`)
+### 🆕 评估器 (`src/eval/evaluator.py`)
 - **功能**: 提供分割任务的标准评估指标
 - **支持指标**: IoU、Dice、Accuracy、Precision、Recall
 - **特点**: 支持二分类和多分类分割
+- **预留接口**: 自动检测任务类型、通用评估、高级指标计算
 
 ### 🆕 可视化器 (`src/viz/visualizer.py`)
 - **功能**: 生成训练和验证结果的可视化
 - **输出**: 预测掩码、叠加图像、对比图
 - **扩展接口**: 预留多面板可视化、指标曲线等功能
+
+### 🆕 颜色映射模块 (`src/viz/colorize.py`)
+- **功能**: 提供分割掩码的颜色映射和可视化函数
+- **特点**:
+  - `id_to_color()`: 将分割ID转换为彩色图像
+  - `make_triplet()`: 创建原图-真值-预测的三联对比图
+  - `overlay()`: 在原图上叠加半透明分割结果
+- **应用**: 用于演示脚本和训练可视化
+
+### 🆕 全局常量模块 (`src/common/constants.py`)
+- **功能**: 统一管理项目全局常量和配置
+- **内容**:
+  - `CLASSES`: 类别ID到名称的映射（background, instrument, target_organ等）
+  - `PALETTE`: 类别ID到RGB颜色的映射
+  - `IGNORE_INDEX`: 忽略标签的索引值
+- **优势**: 中心化配置，便于维护和修改
+
+### 🆕 MobileUNet模型 (`src/models/online/mobile_unet.py`)
+- **功能**: 轻量级分割模型，适用于在线推理
+- **特点**:
+  - 采用深度可分离卷积（DepthwiseSeparableConv）
+  - 大幅减少参数量和计算量
+  - 保持U-Net架构的跳跃连接设计
+- **应用**: 移动设备部署、实时推理场景
+
+### 🆕 多类分割演示脚本 (`scripts/demo_multiclass_color.py`)
+- **功能**: 展示多类分割模型的推理和可视化效果
+- **特点**:
+  - 支持加载预训练模型进行推理
+  - 可选择提供真值标签生成三联对比图
+  - 输出彩色可视化结果
+- **用法**: 用于模型效果演示和结果验证
 
 ## 使用指南
 
@@ -202,19 +241,25 @@ monitor.print_epoch_summary(epoch+1, {"loss": avg_train_loss}, val_metrics)
 
 ### 预期监控输出
 ```
-Epoch 1/3 [10/67] | loss: 0.3245 | CPU: 25.3% | GPU: 78% (1024/8192MB) | Time: 00:02:45
+Epoch 1/20 [66/1078] | loss: 0.4183 | CPU: 7.1% | GPU: 99% (7971/8188MB) | Time: 00:21:02 | ETA: 06:23:45
 Epoch 1 Summary:
   Train - loss: 0.2456
   Val   - val_loss: 0.2234 | iou: 0.7234 | dice: 0.8156 | accuracy: 0.9123
+--------------------------------------------------------------------------------
 ```
 
 ## 开发路线图
 
 ### 近期目标 (已完成)
 - ✅ 基础训练框架
-- ✅ 监控和可视化模块
+- ✅ 监控和可视化模块（包含ETA时间预估）
 - ✅ 通用训练模板
 - ✅ 评估指标模块
+- ✅ 实时训练进度监控（时间、资源、ETA）
+- ✅ 分割可视化工具（颜色映射、对比图生成）
+- ✅ 全局常量和配置管理系统
+- ✅ 多类分割演示脚本
+- ✅ 轻量级MobileUNet模型（深度可分离卷积）
 
 ### 中期目标 (计划中)
 - 📋 在线推理和自适应模块
