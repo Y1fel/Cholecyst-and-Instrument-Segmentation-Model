@@ -136,7 +136,7 @@ class SegDatasetMin(Dataset):
                     print(f"  Sample {i}: Raw values {unique_raw} -> Foreground ratio {foreground_ratio:.3f}")
             
             avg_ratio = np.mean(foreground_ratios)
-            print(f"📊 平均前景比例: {avg_ratio:.3f}")
-            print(f"📊 前景比例范围: {np.min(foreground_ratios):.3f} - {np.max(foreground_ratios):.3f}")
+            print(f"平均前景比例: {avg_ratio:.3f}")
+            print(f"前景比例范围: {np.min(foreground_ratios):.3f} - {np.max(foreground_ratios):.3f}")
             
             return foreground_ratios

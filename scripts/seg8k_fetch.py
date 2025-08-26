@@ -104,8 +104,8 @@ def main():
     print(f"[OK] Cache path: {cache_path}")
 
     # Record cache path
-    os.makedirs("data", exist_ok=True)
-    with open("data/seg8k_cache_path.json", "w", encoding="utf-8") as f:
+    os.makedirs("../src/dataio/datasets/data", exist_ok=True)
+    with open("../src/dataio/datasets/data/seg8k_cache_path.json", "w", encoding="utf-8") as f:
         json.dump({"cache_path": cache_path}, f, ensure_ascii=False, indent=2)
 
     dst = os.path.abspath(args.dst)
