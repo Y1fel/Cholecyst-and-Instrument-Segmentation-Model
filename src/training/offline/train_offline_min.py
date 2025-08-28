@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
 from src.models.baseline.unet_min import UNetMin
 
-from src.metrics.evaluator import Evaluator
+from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 
