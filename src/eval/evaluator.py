@@ -62,6 +62,19 @@ class Evaluator:
 
         return metrics
     
+    def logits_to_preds(logits, threshold: float = 0.5):
+        """
+        统一把训练期 logits 转为离散预测：
+        - 二类: sigmoid -> 阈值 -> [B,H,W]
+        - 多类: argmax(logits, dim=1) -> [B,H,W]
+        """
+        import torch
+        if logits.shape[1] == 1:
+            probs = torch.sigmoid(logits)
+            return (probs > threshold).long().squeeze(1)
+        else:
+            return torch.argmax(logits, dim=1)
+        
     def auto_detect_task_type(self, logits, masks):
         """预留接口：自动检测任务类型（二分类/多分类）"""
         # TODO: 自动检测任务类型（二分类/多分类）
