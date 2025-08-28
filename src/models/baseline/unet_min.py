@@ -86,4 +86,5 @@ class UNetMin(nn.Module):
         y = self.up3(y, x2)
         y = self.up4(y, x1)
 
-        return self.outc(y)
+        logits = self.outc(y)
+        return torch.sigmoid(logits)

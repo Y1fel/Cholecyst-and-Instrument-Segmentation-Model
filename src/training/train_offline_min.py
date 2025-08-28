@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
 from src.models.baseline.unet_min import UNetMin
 
-from src.metrics.evaluator import Evaluator
+from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 
@@ -51,8 +51,8 @@ def main():
     # dataset initialization
     full_dataset = SegDatasetMin(args.data_root, "", args.img_size)
 
-    # 🆕 添加数据分析
-    print("🔍 分析修复后的数据集...")
+    #添加数据分析
+    print("分析修复后的数据集...")
     if hasattr(full_dataset, 'analyze_mask_distribution'):
         full_dataset.analyze_mask_distribution(num_samples=20)
     
@@ -83,7 +83,7 @@ def main():
     # Model and optimizer
     out_ch = 1 if args.num_classes == 2 else args.num_classes
     model = UNetMin(in_ch=3, num_classes=out_ch, base=64).to(device)
-    criterion = nn.BCEWithLogitsLoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
+    criterion = nn.BCELoss() if args.num_classes == 2 else nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # best checkpoint value
