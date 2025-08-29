@@ -30,7 +30,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--img", required=True, help="原图路径")
     ap.add_argument("--size", type=int, default=512)
-    ap.add_argument("--num_classes", type=int, default=5)
+    ap.add_argument("--num_classes", type=int, default=10)
     ap.add_argument("--ckpt", type=str, default="")
     ap.add_argument("--gt", type=str, default="")  # 可选：提供GT用于三联图
     ap.add_argument("--out", type=str, default="viz_triplet.png")

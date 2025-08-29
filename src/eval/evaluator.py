@@ -74,7 +74,64 @@ class Evaluator:
             return (probs > threshold).long().squeeze(1)
         else:
             return torch.argmax(logits, dim=1)
-        
+
+    @torch.inference_mode()
+    def evaluate_multiclass(self, model, val_loader, criterion, num_classes: int, ignore_index: int) -> Dict:
+        """多类评估接口"""
+        model.eval()
+        total_loss  = 0.0
+        total_count = 0
+
+        # accmulate confusion matrix
+        confusion_matrix = torch.zeros((num_classes, num_classes), dtype=torch.long, device=self.device)
+
+        for images, targets in val_loader:
+            images  = images.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True).long()
+            logits  = model(images)
+            loss    = criterion(logits, targets)
+            total_loss  += float(loss.item()) * images.size(0)
+            total_count += images.size(0)
+
+            # predict
+            preds = logits.argmax(dim=1)
+
+            # ignore index
+            valid = (targets != ignore_index)
+            if valid.sum() == 0:
+                continue
+
+            preds_v   = preds[valid].view(-1)
+            targets_v = targets[valid].view(-1)
+
+            # calculate
+            idx               = targets_v * num_classes + preds_v
+            bincount          = torch.bincount(idx, minlength=num_classes * num_classes)
+            confusion_matrix += bincount.view(num_classes, num_classes)
+
+        # from confusion matrix calculate
+        tp = confusion_matrix.diag().float()
+        fp = confusion_matrix.sum(dim=0).float() - tp
+        fn = confusion_matrix.sum(dim=1).float() - tp
+        denom_iou  = tp + fp + fn
+        denom_dice = (2 * tp + fp + fn)
+
+        iou_per_class   = torch.where(denom_iou > 0, tp / denom_iou, torch.zeros_like(tp))
+        dice_per_class  = torch.where(denom_dice > 0, 2 * tp / denom_dice, torch.zeros_like(tp))
+        acc_per_class   = torch.where((tp + fn) > 0, tp / (tp + fn), torch.zeros_like(tp))
+
+        metrics = {
+            "val_loss":       total_loss / total_count,
+            "miou":           iou_per_class.mean().item(),
+            "mdice":          dice_per_class.mean().item(),
+            "macc":           acc_per_class.mean().item(),
+            "iou_per_class":  iou_per_class.tolist(),
+            "dice_per_class": dice_per_class.tolist(),
+            "acc_per_class":  acc_per_class.tolist()
+        }
+
+        return metrics
+
     def auto_detect_task_type(self, logits, masks):
         """预留接口：自动检测任务类型（二分类/多分类）"""
         # TODO: 自动检测任务类型（二分类/多分类）

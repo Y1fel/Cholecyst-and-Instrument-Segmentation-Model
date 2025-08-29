@@ -237,3 +237,7 @@ __pycache__/
 # Docker 产物（如有）
 *.tar
 improved_training_config.py
+
+# 水平集学习相关文档
+WATERSHED_LEARNING_EXPLAINED.md
+WATERSHED_MECHANISM_EXPLAINED.md

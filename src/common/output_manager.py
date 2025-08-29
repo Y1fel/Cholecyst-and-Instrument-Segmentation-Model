@@ -13,6 +13,7 @@ class OutputManager:
         # build basic directory structure
         self._setup_directories()
 
+    # Setup directories for the current run
     def _setup_directories(self):
         # construct basic dir
         dirs = [
@@ -24,15 +25,19 @@ class OutputManager:
         for dir_path in dirs: # loop and make
             os.makedirs(dir_path, exist_ok=True)
 
+    # Get path for visualizations
     def get_vis_dir(self) -> str:
         return os.path.join(self.run_dir, "visualizations")
 
+    # Get path for checkpoints
     def get_checkpoints_dir(self) -> str:
         return os.path.join(self.run_dir, "checkpoints")
 
+    # Get path for metrics CSV
     def get_metrics_csv_path(self) -> str:
         return os.path.join(self.run_dir, "metrics.csv")
 
+    # Save config to JSON
     def save_config(self, config: Dict):
         config_path = os.path.join(self.run_dir, "config.json")
         config_with_meta = {
@@ -46,6 +51,7 @@ class OutputManager:
 
         print(f"Config saved to: {config_path}")
 
+    # Save metrics to CSV
     def save_metrics_csv(self, metrics: Dict, epoch: int):
         # Append metrics to CSV
         csv_path = self.get_metrics_csv_path()
@@ -66,24 +72,7 @@ class OutputManager:
                 writer.writeheader()
             writer.writerow(row_data) # write the data row
 
-    def save_model(self, model, epoch: int, metrics: Dict):
-        checkpoint = { # Create a checkpoint dictionary
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'metrics': metrics,
-            'timestamp': self.timestamp
-        }
-
-        # save the newest model
-        model_path = os.path.join(
-            self.get_checkpoints_dir(),
-            f"{self.model_type}_epoch_{epoch:03d}.pth"
-        )
-        torch.save(checkpoint, model_path) # Save the model checkpoint
-        print(f"Model saved to: {model_path}")
-
-        return model_path
-
+    # obtain run summary
     def get_run_summary(self) -> Dict: # get summary of current run
         return {
             "run_dir": self.run_dir,
@@ -96,45 +85,99 @@ class OutputManager:
             }
         }
 
-    # get checkpoint with best performance
-    def get_best_model_path(self) -> str:
-        checkpoints_dir = self.get_checkpoints_dir()
-        csv_path = self.get_metrics_csv_path()
+    # save model
+    def save_model(self, model, epoch: int, metrics:Dict, is_best: bool = False):
+        checkpoint = { # Create a checkpoint dictionary
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'metrics': metrics,
+            'timestamp': self.timestamp,
+            'is_best': is_best
+        }
 
-        if not os.path.exists(checkpoints_dir) or not os.path.exists(csv_path):
-            return ""
+        # save every checkpoint
+        epoch_path = os.path.join(
+            self.get_checkpoints_dir(),
+            f"{self.model_type}_epoch_{epoch:03d}.pth"
+        )
+        torch.save(checkpoint, epoch_path)
+        print(f"✓ Saved checkpoint: {os.path.basename(epoch_path)}")
 
-        try:
-            import pandas as pd
-            df = pd.read_csv(csv_path)
-
-            if df.empty:
-                return ""
+        # if best, save a copy as best
+        if is_best:
+            best_checkpoint = checkpoint.copy()
+            best_checkpoint['best_epoch'] = epoch
             
-            # by val_loss find the best epoch
-            if 'val_loss' in df.columns:
-                best_epoch = df.loc[df['val_loss'].idxmin(), 'epoch']
-                print(f"Best epoch by validation loss: {best_epoch} with val_loss: {df['val_loss'].min():.4f}")
-            elif 'iou' in df.columns:
-                best_epoch = df.loc[df['iou'].idxmax(), 'epoch']
-                print(f"Best epoch by IoU: {best_epoch} with IoU: {df['iou'].max():.4f}")
-            else:
-                best_epoch = df['epoch'].max()
-                print(f"No specific metric found, using latest epoch: {best_epoch}")
-
-            model_fname = f"{self.model_type}_epoch_{best_epoch:03d}.pth"
-            model_path  = os.path.join(checkpoints_dir, model_fname)
-
-            if os.path.exists(model_path):
-                print(f"Best model found: {model_path}")
-                return model_path
-            else:
-                print(f"Best model file not found: {model_path}, using latest")
-                return self._get_latest_checkpoint()  # Fallback to latest checkpoint
+            best_path = os.path.join(
+                self.get_checkpoints_dir(),
+                f"{self.model_type}_best.pth"
+            )
+            torch.save(best_checkpoint, best_path)
+            print(f"BEST: Saved best model: {os.path.basename(best_path)}")
+            
+            # update best model record
+            self._update_best_model_record(epoch, metrics, best_path)
+            
+            return best_path
         
-        except Exception as e:
-            print(f"Error occurred while getting best model path: {e}, using latest")
-            return self._get_latest_checkpoint()  # Fallback to latest checkpoint
+        return epoch_path
+
+    # save checkpoint by interval
+    def save_checkpoint_if_needed(self, model, epoch: int, metrics: Dict, 
+                                current_best_metric: float, metric_name: str = 'val_loss',
+                                minimize: bool = True, save_interval: int = 5):
+        """
+        智能保存checkpoint，自动判断是否为最佳模型
+        Args:
+            model: 模型
+            epoch: epoch
+            metrics: 指标
+            current_best_metric: 当前最佳指标值
+            metric_name: 用于判断的指标名称
+            minimize: True表示指标越小越好，False表示越大越好
+            save_interval: 常规保存间隔
+        """
+        current_metric = metrics.get(metric_name)
+        if current_metric is None:
+            print(f"Metric '{metric_name}' not found in metrics")
+            return self.save_model(model, epoch, metrics, is_best=False), current_best_metric
+        
+        # check if best
+        is_best = False
+        new_best_metric = current_best_metric
+
+        if minimize: # switch metric valuation standard by minimize
+            if current_metric < current_best_metric:
+                is_best = True
+                new_best_metric = current_metric
+        else:
+            if current_metric > current_best_metric: # such as acc, the greater the better
+                is_best = True
+                new_best_metric = current_metric
+
+        # save the model
+        saved_path = self.save_model(model, epoch, metrics, is_best=is_best)
+
+        if is_best:
+            print(f"BEST: New best model at epoch {epoch} with {metric_name}: {current_metric:.4f}")
+        elif epoch % save_interval == 0:
+            print(f"SAVED: Regular checkpoint saved at epoch {epoch}")
+
+        return saved_path, new_best_metric
+
+
+    def _update_best_model_record(self, epoch: int, metrics: Dict, model_path: str):
+        best_record_path = os.path.join(self.run_dir, "best_model_info.json")
+        best_info = {
+            'best_epoch': epoch,
+            'best_metrics': metrics,
+            'model_path': model_path,
+            'timestamp': self.timestamp,
+            'updated_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        with open(best_record_path, 'w') as f:
+            json.dump(best_info, f, indent=2)  
 
     # get latest checkpoint
     def _get_latest_checkpoint(self) -> str:

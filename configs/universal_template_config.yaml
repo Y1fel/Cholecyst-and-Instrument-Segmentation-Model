@@ -2,26 +2,51 @@
 # 通用训练模板配置文件
 
 # 基础训练参数
-model_type: "universal_unet"
-epochs: 10
-batch_size: 8
-lr: 3e-4
-num_classes: 2
+model_type: "baseline_multi"
+model: "unet_min"
+epochs: 5
+batch_size: 6
+lr: 0.0003
+num_classes: 10
 
 # 数据参数
 img_size: 512
 val_ratio: 0.2
 num_workers: 4
+split: "train"
+
+# 优化器和调度器
+optimizer: "adamw"
+scheduler: "cosine"
+weight_decay: 0.0001
+sgd_momentum: 0.9
+
+# 数据增强
+augment: true
+flip_prob: 0.5
+rotation_degree: 15
 
 # 监控和可视化参数
 monitor_interval: 5        # 每5个batch更新一次进度
 enable_gpu_monitor: true   # 启用GPU监控
 save_viz: true            # 保存可视化结果
-viz_samples: 30           # 可视化样本数量
+viz_samples: 50           # 可视化样本数量
+
+# 验证和保存
+val_interval: 1           # 每epoch验证
+save_interval: 1          # 每xepoch保存检查点
+
+# 早停机制
+early_stopping: false
+patience: 5
 
 # 高级选项
 debug: false
 save_best_only: true
+stage: "offline"
+
+# 任务配置
+binary: false            # 使用多类分割
 
 # 模型特定参数（可根据不同模型调整）
 model_params:
