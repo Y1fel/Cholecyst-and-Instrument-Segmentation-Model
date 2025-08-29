@@ -29,6 +29,10 @@ class OutputManager:
     def get_vis_dir(self) -> str:
         return os.path.join(self.run_dir, "visualizations")
 
+    # Get path for specific visualization file
+    def get_viz_path(self, filename: str) -> str:
+        return os.path.join(self.get_vis_dir(), filename)
+
     # Get path for checkpoints
     def get_checkpoints_dir(self) -> str:
         return os.path.join(self.run_dir, "checkpoints")

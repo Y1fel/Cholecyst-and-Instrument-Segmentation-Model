@@ -78,15 +78,15 @@ class SegDatasetMin(Dataset):
             else:
                 mask_types['original'] = mask_types.get('original', 0) + 1
         
-        print(f"📁 数据集加载完成: {len(self.pairs)} 对图像-标签")
+        print(f"-- Dataset loaded: {len(self.pairs)} image-mask pairs")
         if self.return_multiclass:
-            print(f"🎯 多分类模式: Watershed区域→训练类别映射")
+            print(f"-- Multi-class mode: Watershed regions → training class mapping")
         else:
-            print(f"🎯 二分类模式: 胆囊+器械 vs 背景")
+            print(f"-- Binary mode: target + instrument vs background")
         
         dominant_type = max(mask_types, key=mask_types.get) if mask_types else 'unknown'
-        print(f"🏷️  主要标签类型: {dominant_type} ({mask_types.get(dominant_type, 0)}/{min(20, len(self.pairs))} 样本)")
-        print(f"📏 图像尺寸: {self.img_size}x{self.img_size}")
+        print(f"-- Dominant mask type: {dominant_type} ({mask_types.get(dominant_type, 0)}/{min(20, len(self.pairs))} samples)")
+        print(f"-- Image size: {self.img_size}x{self.img_size}")
         print("-" * 50)
 
     def __len__(self):
@@ -155,10 +155,11 @@ class SegDatasetMin(Dataset):
                 m[mask == 255] = self.ignore_index
                 
                 # 只显示前5个样本的详细信息，之后只显示简化版本
-                if index < 5:
-                    print(f"  [WATERSHED] 区域重新编号: {len(unique_regions)}个原始区域→{class_id-1}个训练类别")
-                elif index == 5:
-                    print(f"  [WATERSHED] 后续样本区域编号将静默处理...")
+                # if index < 5:
+                #     print(f"  [WATERSHED] 区域重新编号: {len(unique_regions)}个原始区域→{class_id-1}个训练类别")
+                # elif index == 5:
+                #     print(f"  [WATERSHED] 后续样本区域编号将静默处理...")
+
             # 检查是否使用精确GT  
             elif os.path.basename(mask_path).endswith('_precise_gt.png'):
                 # 精确GT：直接使用，不需要重新映射
@@ -168,19 +169,22 @@ class SegDatasetMin(Dataset):
                     for mask_id, train_name in precise_mapping.items():
                         m[mask == mask_id] = train_name
                     if index < 3:
-                        print(f"  [PRECISE_GT] 直接使用精确类别映射")
+                        # print(f"  [PRECISE_GT] 直接使用精确类别映射")
+                        pass
                 else:
                     # 如果没有精确映射，使用原始映射
                     for mask_id, train_name in self.class_id_map.items():
                         m[mask == mask_id] = train_name
                     if index < 3:
-                        print(f"  [PRECISE_GT] 使用原始类别映射")
+                        # print(f"  [PRECISE_GT] 使用原始类别映射")
+                        pass
             else:
                 # 原始mask：使用原有映射逻辑
                 for mask_id, train_name in self.class_id_map.items():
                     m[mask == mask_id] = train_name
                 if index < 3:
-                    print(f"  [ORIGINAL] 使用原始类别映射")
+                    # print(f"  [ORIGINAL] 使用原始类别映射")
+                    pass
             
             # 最近邻缩放，保持离散标签不被污染
             m           = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
@@ -197,9 +201,10 @@ class SegDatasetMin(Dataset):
                     mask_type = "PRECISE_GT"  
                 else:
                     mask_type = "ORIGINAL"
-                print(f"[MC] Sample {index} ({mask_type}): classes={unique.tolist()} (ignore {self.ignore_index})")
+                # print(f"[MC] Sample {index} ({mask_type}): classes={unique.tolist()} (ignore {self.ignore_index})")
             elif index == 5:
-                print(f"[MC] 数据加载正常，后续样本将静默处理...")
+                # print(f"[MC] 数据加载正常，后续样本将静默处理...")
+                pass
             return img_tensor, mask_tensor
         else:
             # binary
@@ -211,9 +216,10 @@ class SegDatasetMin(Dataset):
 
             if index < 5:
                 foreground_ratio = float(fg.mean())
-                print(f"[BIN] Sample {index}: Foreground ratio={foreground_ratio:.3f}")
+                # print(f"[BIN] Sample {index}: Foreground ratio={foreground_ratio:.3f}")
             elif index == 5:
-                print(f"[BIN] 二分类数据加载正常，后续样本将静默处理...")
+                # print(f"[BIN] 二分类数据加载正常，后续样本将静默处理...")
+                pass
             return img_tensor, mask_tensor
 
     def _get_multiclass_mask_candidates(self, stem):
@@ -235,7 +241,7 @@ class SegDatasetMin(Dataset):
 
     def analyze_mask_distribution(self, num_samples=50):
             """分析mask分布情况"""
-            print("🔍 分析前景分布（看二分类合并后的前景占比）...")
+            print("-- Analyzing foreground distribution (foreground ratio after binary merging)...")
             # print("Analyzing foreground distribution...")
             
             foreground_ratios = []
@@ -258,7 +264,7 @@ class SegDatasetMin(Dataset):
                     print(f"  Sample {i}: Raw values {unique_raw} -> Foreground ratio {foreground_ratio:.3f}")
             
             avg_ratio = np.mean(foreground_ratios)
-            print(f"平均前景比例: {avg_ratio:.3f}")
-            print(f"前景比例范围: {np.min(foreground_ratios):.3f} - {np.max(foreground_ratios):.3f}")
-            
+            print(f"Average foreground ratio: {avg_ratio:.3f}")
+            print(f"Foreground ratio range: {np.min(foreground_ratios):.3f} - {np.max(foreground_ratios):.3f}")
+
             return foreground_ratios

@@ -296,10 +296,10 @@ def train_one_epoch(
                 )
 
         # Force output every 50 batches to avoid long periods without output
-        if step > 0 and (step % 50) == 0:
-            avg = running_loss / max(1, (step + 1) * args.batch_size)
-            print(f"\n[Checkpoint] Epoch {epoch_index + 1}/{args.epochs} Batch {step + 1}/{total} | Loss: {avg:.4f}")
-            sys.stdout.flush()
+        # if step > 0 and (step % 50) == 0:
+        #     avg = running_loss / max(1, (step + 1) * args.batch_size)
+        #     print(f"\n[Checkpoint] Epoch {epoch_index + 1}/{args.epochs} Batch {step + 1}/{total} | Loss: {avg:.4f}")
+        #     sys.stdout.flush()
 
     return running_loss / (len(loader.dataset) if hasattr(loader, 'dataset') else (total * args.batch_size))
 

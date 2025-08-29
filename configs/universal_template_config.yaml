@@ -4,7 +4,7 @@
 # 基础训练参数
 model_type: "baseline_multi"
 model: "unet_min"
-epochs: 5
+epochs: 20
 batch_size: 6
 lr: 0.0003
 num_classes: 10
