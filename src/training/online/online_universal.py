@@ -16,10 +16,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# 添加项目根目录到Python路径
+# 路径修正，确保src包可import
+import sys, os
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(os.path.dirname(current_dir))
-sys.path.append(parent_dir)
+project_root = os.path.dirname(os.path.dirname(current_dir))
+src_dir = os.path.join(project_root, "src")
+sys.path.insert(0, src_dir)
 
 # 导入通用模块
 from src.eval.evaluator import Evaluator
@@ -90,11 +92,10 @@ class FrameSelector:
             # 计算相似度的均值和标准差
             mean_sim = np.mean(self.similarity_history)
             std_sim = np.std(self.similarity_history)
-
             # 自适应阈值：均值减去0.5倍标准差
-            adaptive_threshold = max(0.7, min(0.95, mean_sim - 0.5 * std_sim))
+            adaptive_threshold = max(0.7, min(0.95, float(mean_sim - 0.5 * std_sim)))
         else:
-            adaptive_threshold = self.threshold
+            adaptive_threshold = float(self.threshold)
 
         # 更新参考帧
         self.last_frame = frames[2]
@@ -170,13 +171,30 @@ def parse_args():
     p.add_argument("--model_type", type=str, default=None,
                    help="若不指定，将自动使用 --model 的值。")
 
+    # 离线模型参数
+    p.add_argument("--offline_model_path", type=str, help="Path to the offline model checkpoint")
+    p.add_argument("--offline_model_name", type=str, help="Model name for the offline model")
+    p.add_argument("--offline_num_classes", type=int, help="Number of classes for the offline model")
+
     return p.parse_args()
+
+
+# ==== 离线模型伪标签推理工具 ==== #
+def load_offline_model(model_path, model_name, num_classes, device):
+    from src.models.model_zoo import build_model
+    model = build_model(model_name, num_classes=num_classes, in_ch=3)
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    model.to(device)
+    return model
 
 
 class OnlineLearner:
     """在线学习器，管理模型训练和缓冲区"""
 
-    def __init__(self, model, device, args, output_mgr, monitor):
+    def __init__(self, model, device, args, output_mgr, monitor,
+                 offline_model_path=None, offline_model_name=None, offline_num_classes=None):
         self.model = model.to(device)
         self.device = device
         self.args = args
@@ -215,6 +233,12 @@ class OnlineLearner:
         # 训练状态
         self.loss_history = []
         self.metrics_history = []
+
+        # ==== 离线模型加载（伪标签生成用）==== #
+        self.offline_model = None
+        if offline_model_path and offline_model_name and offline_num_classes:
+            self.offline_model = load_offline_model(
+                offline_model_path, offline_model_name, offline_num_classes, device)
 
     def process_single_frame(self, x):
         """处理单帧的辅助函数"""
@@ -306,68 +330,71 @@ class OnlineLearner:
             print(f"Initial Metrics - Loss: {initial_metrics['val_loss']:.4f}, IoU: {initial_metrics['iou']:.4f}")
 
         # 在线学习循环
-        for step in range(self.args.online_steps):
-            try:
-                # 获取新数据
-                inputs, targets = next(iter(train_loader))
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
+        for step, (images, _) in enumerate(train_loader):
+            images = images.to(self.device)
+            # ==== 伪标签生成与训练 ====
+            if self.offline_model is not None:
+                with torch.no_grad():
+                    logits = self.offline_model(images)
+                    pseudo_labels = torch.argmax(logits, dim=1)
+                # 用伪标签训练online模型
+                self.model.train()
+                self.optimizer.zero_grad()
+                outputs = self.model(images)
+                if self.args.binary:
+                    loss = self.criterion(outputs, pseudo_labels.float())
+                else:
+                    loss = self.criterion(outputs, pseudo_labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.loss_history.append(loss.item())
+                frame_stats = {'all_frames': 0, 'single_frame': 0} # 伪标签流程不统计帧选择
+            else:
+                loss = None
+                frame_stats = None
 
-                # 执行一步适应
-                loss, frame_stats = self.adapt_step(inputs, targets)
-                self.loss_history.append(loss)
-
-                # 监控进度
-                if step % self.args.monitor_interval == 0:
+            # 监控进度
+            if step % self.args.monitor_interval == 0:
+                if loss is not None:
                     self.monitor.print_progress(
                         step + 1, self.args.online_steps,
-                        0, 0,  # 不使用批次信息
+                        0, 0,
                         {"loss": loss},
                         refresh=True
                     )
+                if self.frame_selector is not None and frame_stats is not None:
+                    total = frame_stats['all_frames'] + frame_stats['single_frame']
+                    if total > 0:
+                        all_percent = 100 * frame_stats['all_frames'] / total
+                        single_percent = 100 * frame_stats['single_frame'] / total
+                        print(f"  Frame processing: All={all_percent:.1f}%, Single={single_percent:.1f}%")
 
-                    # 打印帧处理统计
-                    if self.frame_selector is not None:
-                        total = frame_stats['all_frames'] + frame_stats['single_frame']
-                        if total > 0:
-                            all_percent = 100 * frame_stats['all_frames'] / total
-                            single_percent = 100 * frame_stats['single_frame'] / total
-                            print(f"  Frame processing: All={all_percent:.1f}%, Single={single_percent:.1f}%")
-
-                # 定期评估
-                if val_loader is not None and step % self.args.eval_interval == 0:
+            # 定期评估
+            if val_loader is not None and step % self.args.eval_interval == 0:
+                if loss is not None:
                     val_metrics = self.evaluate(val_loader)
                     self.metrics_history.append(val_metrics)
-
-                    # 保存指标
                     combined_metrics = {"step": step, "train_loss": loss}
                     combined_metrics.update(val_metrics)
                     self.output_mgr.save_metrics_csv(combined_metrics, step)
-
-                    # 打印评估结果
                     print(
                         f"[Step {step}] "
                         f"Val loss: {val_metrics['val_loss']:.4f} | "
                         f"IoU: {val_metrics['iou']:.4f} | Dice: {val_metrics['dice']:.4f}"
                     )
 
-                # 定期可视化
-                if self.args.save_viz and step % self.args.viz_interval == 0 and val_loader is not None:
-                    print(f"Generating visualizations at step {step}...")
-                    step_viz_dir = os.path.join(viz_dir, f"step_{step}")
-                    os.makedirs(step_viz_dir, exist_ok=True)
+            # 定期可视化
+            if self.args.save_viz and step % self.args.viz_interval == 0 and val_loader is not None:
+                print(f"Generating visualizations at step {step}...")
+                step_viz_dir = os.path.join(viz_dir, f"step_{step}")
+                os.makedirs(step_viz_dir, exist_ok=True)
 
-                    visualizer.save_comparison_predictions(
-                        self.model, val_loader, step_viz_dir,
-                        max_samples=self.args.viz_samples, device=self.device
-                    )
-
-            except StopIteration:
-                # 数据加载器耗尽，重新创建
-                train_loader = DataLoader(
-                    train_loader.dataset,
-                    batch_size=train_loader.batch_size,
-                    shuffle=True
+                visualizer.save_comparison_predictions(
+                    self.model, val_loader, step_viz_dir,
+                    max_samples=self.args.viz_samples, device=self.device
                 )
+
 
         # 最终可视化
         if self.args.save_viz and val_loader is not None:
@@ -420,7 +447,12 @@ def main():
     model = build_model(args.model, num_classes=num_classes, in_ch=3)
 
     # 初始化在线学习器
-    learner = OnlineLearner(model, device, args, output_mgr, monitor)
+    learner = OnlineLearner(
+        model, device, args, output_mgr, monitor,
+        offline_model_path=args.offline_model_path,
+        offline_model_name=args.offline_model_name,
+        offline_num_classes=args.offline_num_classes
+    )
 
     # 运行在线学习
     loss_history, metrics_history = learner.run_online_learning(data_loader, val_loader)
