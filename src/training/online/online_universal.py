@@ -28,6 +28,7 @@ from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 from src.common.train_monitor import TrainMonitor
+from src.common.pseudo_label_quality import quality_filter
 
 # 模型导入
 from src.models.model_zoo import build_model
@@ -336,7 +337,15 @@ class OnlineLearner:
             if self.offline_model is not None:
                 with torch.no_grad():
                     logits = self.offline_model(images)
-                    pseudo_labels = torch.argmax(logits, dim=1)
+                    probs = torch.softmax(logits, dim=1).cpu().numpy()
+                    pseudo_labels = torch.argmax(probs, axis=1)
+                    # 伪标签质控
+                    mask = quality_filter(probs, pseudo_labels)
+                    if not np.any(mask):
+                        print(f"Step {step}: No pseudo labels passed quality control, skipping batch.")
+                        continue
+                    pseudo_labels = torch.from_numpy(pseudo_labels[mask]).to(self.device)
+                    images = images[mask]
                 # 用伪标签训练online模型
                 self.model.train()
                 self.optimizer.zero_grad()

@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from src.models.model_zoo import build_model
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
+from src.common.pseudo_label_quality import quality_filter
 import numpy as np
 import argparse
 
@@ -24,21 +25,30 @@ def generate_pseudo_labels(model_path, data_root, output_path, model_name='unet_
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     all_preds = []
+    all_probs = []
     all_names = []
     with torch.no_grad():
         for images, _ in loader:
             images = images.to(device)
             logits = model(images)
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+            preds = np.argmax(probs, axis=1)
+            # 质控筛选
+            mask = quality_filter(probs, preds)
+            preds = preds[mask]
             all_preds.append(preds)
+            all_probs.append(probs[mask])
             # 假设dataset返回文件名或索引
             if hasattr(dataset, 'get_names'):
-                all_names.extend(dataset.get_names())
+                names = dataset.get_names()
+                all_names.extend(np.array(names)[mask])
 
-    all_preds = np.concatenate(all_preds, axis=0)
-    # 保存为npy或csv
-    np.save(output_path, all_preds)
-    print(f"Pseudo labels saved to {output_path}")
+    if all_preds:
+        all_preds = np.concatenate(all_preds, axis=0)
+        np.save(output_path, all_preds)
+        print(f"Pseudo labels saved to {output_path}")
+    else:
+        print("No pseudo labels passed quality control.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Generate pseudo labels using trained model")
@@ -51,4 +61,3 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=8)
     args = parser.parse_args()
     generate_pseudo_labels(args.model_path, args.data_root, args.output_path, args.model_name, args.num_classes, args.img_size, args.batch_size)
-
