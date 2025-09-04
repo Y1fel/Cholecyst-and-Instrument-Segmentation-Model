@@ -39,30 +39,30 @@ def build_model(
 
     # 阶段检查
     if stage == 'offline' and model_name not in OFFLINE_MODELS:
-        print(f"⚠️  {model_name} is not an offline model, falling back to unet_min")
+        print(f"{model_name} is not an offline model, falling back to unet_min")
         model_name = 'unet_min'
     elif stage == 'online' and model_name not in ONLINE_MODELS:
-        print(f"⚠️  {model_name} is not an online model, falling back to mobile_unet")
+        print(f"{model_name} is not an online model, falling back to mobile_unet")
         model_name = 'mobile_unet'
 
     if model_name == 'unet_min':
-        print(f"✅ Using UNetMin with {out_ch} output channels")
+        print(f"Using UNetMin with {out_ch} output channels")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
     
     
     if model_name == 'mobile_unet' and MobileUNet is not None:
-        print(f"✅ Using MobileUNet with {out_ch} output channels")
+        print(f"Using MobileUNet with {out_ch} output channels")
         return MobileUNet(n_channels = in_ch, n_classes = out_ch)
     elif model_name == 'mobile_unet':
-        print(f"❌ MobileUNet not available, falling back to UNetMin")
+        print(f"MobileUNet not available, falling back to UNetMin")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
 
 
     if model_name == 'adaptive_unet' and AdaptiveUNet is not None:
-        print(f"✅ Using AdaptiveUNet with {out_ch} output channels")
+        print(f"Using AdaptiveUNet with {out_ch} output channels")
         return AdaptiveUNet(in_channels = in_ch, out_channels = out_ch, init_features = base)
     elif model_name == 'adaptive_unet':
-        print(f"❌ AdaptiveUNet not available, falling back to UNetMin")
+        print(f"AdaptiveUNet not available, falling back to UNetMin")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
 
     
