@@ -87,4 +87,5 @@ class UNetMin(nn.Module):
         y = self.up4(y, x1)
 
         logits = self.outc(y)
-        return torch.sigmoid(logits)
+        # return torch.sigmoid(logits)
+        return logits  # Directly return logits; let the loss function handle activation
