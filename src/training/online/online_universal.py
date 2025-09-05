@@ -335,8 +335,24 @@ class OnlineLearner:
             images = images.to(self.device)
             # ==== 伪标签生成与训练 ====
             if self.offline_model is not None:
+                # 先帧选择，再伪标签生成
+                batch_size, frames, c, h, w = images.shape  # (B, 5, C, H, W)
+                selected_indices = []
+                for i in range(batch_size):
+                    frame_group = images[i]  # (5, C, H, W)
+                    if self.frame_selector is None or self.frame_selector.should_process_all(frame_group):
+                        selected_indices.extend([(i, j) for j in range(frames)])
+                    else:
+                        selected_indices.append((i, 2))  # 只选中间帧
+                if not selected_indices:
+                    print(f"Step {step}: No frames selected for pseudo-labeling, skipping batch.")
+                    continue
+                # 收集选中的帧
+                selected_imgs = torch.stack([
+                    images[i, j] for (i, j) in selected_indices
+                ]).to(self.device)
                 with torch.no_grad():
-                    logits = self.offline_model(images)
+                    logits = self.offline_model(selected_imgs)
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
                     pseudo_labels = torch.argmax(probs, axis=1)
                     # 伪标签质控
@@ -345,11 +361,11 @@ class OnlineLearner:
                         print(f"Step {step}: No pseudo labels passed quality control, skipping batch.")
                         continue
                     pseudo_labels = torch.from_numpy(pseudo_labels[mask]).to(self.device)
-                    images = images[mask]
+                    selected_imgs = selected_imgs[mask]
                 # 用伪标签训练online模型
                 self.model.train()
                 self.optimizer.zero_grad()
-                outputs = self.model(images)
+                outputs = self.model(selected_imgs)
                 if self.args.binary:
                     loss = self.criterion(outputs, pseudo_labels.float())
                 else:
