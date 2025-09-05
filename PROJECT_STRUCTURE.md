@@ -77,6 +77,7 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │  ├─ ReadMe.md                      # ✅ 工具模块说明文档
 │  ├─ class_frame_extractor.py       # 🆕 视频帧提取工具（支持FFmpeg和OpenCV双模式）
 │  └─ class_distillation.py          # 🆕 知识蒸馏框架（损失函数+特征提取器）
+│  └─ class_frame_to_video.py        # 🆕 帧合并视频工具
 │
 ├─ src/                               # ✅ 核心源代码
    ├─ common/                        # ✅ 公共工具

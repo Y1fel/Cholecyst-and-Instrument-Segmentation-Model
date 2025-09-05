@@ -6,15 +6,16 @@
 
 ```
 utils/
-├── class_distillation.py    # 知识蒸馏损失函数
+├── class_distillation.py    # 知识蒸馏和伪标签损失函数
 ├── class_frame_extractor.py # 视频帧提取器
+├── class_frame_to_video.py  # 视频帧合并器
 └── README.md               # 本说明文档
 ```
 
 ## 1. 知识蒸馏模块 (class_distillation.py)
 
 ### 功能概述
-实现了用于模型知识蒸馏的损失函数，支持教师-学生模型的知识传递，包括任务损失、蒸馏损失和特征蒸馏损失。
+实现了用于模型知识蒸馏和伪标签训练的损失函数，支持教师-学生模型的知识传递，包括任务损失、蒸馏损失、特征蒸馏损失和伪标签损失。
 
 ### 主要类
 
@@ -73,6 +74,61 @@ print(f"总损失: {loss_dict['total_loss']}")
 print(f"任务损失: {loss_dict['task_loss']}")
 print(f"蒸馏损失: {loss_dict['distill_loss']}")
 print(f"特征损失: {loss_dict['feature_loss']}")
+```
+
+#### PseudoLabelLoss
+伪标签损失函数类，支持硬伪标签和软伪标签两种模式。
+
+**初始化参数：**
+- `num_classes` (int): 类别数，默认为2（二分类）
+- `use_soft` (bool): 是否使用软伪标签，默认为False（硬标签）
+- `confidence_threshold` (float): 伪标签置信度阈值，默认为0.7
+
+**主要方法：**
+
+##### `forward(student_outputs, teacher_outputs)`
+计算伪标签损失
+
+**参数：**
+- `student_outputs` (torch.Tensor): 学生模型输出
+- `teacher_outputs` (torch.Tensor): 教师模型输出（用于生成伪标签）
+
+**返回值：**
+- `Dict[str, torch.Tensor]`: 包含以下键的字典
+  - `pseudo_loss`: 伪标签损失
+
+**使用示例：**
+
+```python
+import torch
+from utils.class_distillation import PseudoLabelLoss
+
+# 创建伪标签损失函数
+pseudo_loss_fn = PseudoLabelLoss(
+    num_classes=2,
+    use_soft=False,              # 使用硬伪标签
+    confidence_threshold=0.7     # 置信度阈值
+)
+
+# 模拟模型输出
+student_outputs = torch.randn(32, 1)  # 学生模型输出
+teacher_outputs = torch.randn(32, 1)  # 教师模型输出
+
+# 计算伪标签损失
+loss_dict = pseudo_loss_fn(student_outputs, teacher_outputs)
+print(f"伪标签损失: {loss_dict['pseudo_loss']}")
+
+# 软伪标签示例
+soft_pseudo_loss_fn = PseudoLabelLoss(
+    num_classes=8,               # 多分类
+    use_soft=True,               # 使用软伪标签
+    confidence_threshold=0.5
+)
+
+# 多分类伪标签损失
+student_outputs_multi = torch.randn(32, 8)  # 8分类
+teacher_outputs_multi = torch.randn(32, 8)
+loss_dict_multi = soft_pseudo_loss_fn(student_outputs_multi, teacher_outputs_multi)
 ```
 
 ### 训练使用指南
@@ -463,6 +519,125 @@ dataset_frames/
     └── ...
 ```
 
+## 3. 视频帧合并模块 (class_frame_to_video.py)
+
+### 功能概述
+提供将提取的视频帧重新合并成视频的功能，支持批量处理、多种编码格式和详细的日志记录。
+
+### 主要类
+
+#### VideoFrameMerger
+视频帧合并器类，将多个帧文件合并成视频文件。
+
+**初始化参数：**
+- `frame_dirs` (Union[str, List[str]]): 帧目录，可以是单个目录或目录列表
+- `output_path` (str): 输出视频路径
+- `fps` (int): 视频帧率，默认为25
+- `size` (tuple): 输出视频大小 (width, height)，默认为None（使用第一帧大小）
+- `fourcc` (str): 编码格式，默认为"mp4v"
+- `auto_batches` (bool): 是否自动识别batch_x子目录，默认为True
+- `log_path` (str): 日志文件路径，默认为"succeed_frames.txt"
+- `save_failed_log` (bool): 是否保存失败帧日志，默认为True
+
+**主要方法：**
+
+##### `merge()`
+将帧文件合并成视频
+
+**功能：**
+- 自动发现并处理batch_x子目录
+- 按文件名排序帧序列
+- 自动调整帧尺寸
+- 生成详细的处理日志
+- 记录失败的帧文件
+
+**使用示例：**
+
+#### 基本用法
+```python
+from utils.class_frame_to_video import VideoFrameMerger
+
+# 创建合并器
+merger = VideoFrameMerger(
+    frame_dirs="dataset_frames/video_name",  # 帧目录
+    output_path="output_video.mp4",          # 输出视频路径
+    fps=25,                                  # 帧率
+    size=(512, 512),                         # 输出尺寸
+    fourcc="mp4v"                            # 编码格式
+)
+
+# 合并视频
+merger.merge()
+```
+
+#### 处理多个目录
+```python
+# 处理多个帧目录
+merger = VideoFrameMerger(
+    frame_dirs=["frames1", "frames2", "frames3"],  # 多个目录
+    output_path="combined_video.mp4",
+    fps=30,
+    auto_batches=True  # 自动识别batch_x子目录
+)
+
+merger.merge()
+```
+
+#### 自定义编码格式
+```python
+# 使用不同的编码格式
+merger = VideoFrameMerger(
+    frame_dirs="frames",
+    output_path="output.avi",
+    fps=24,
+    fourcc="XVID",        # XVID编码
+    log_path="custom_log.txt",
+    save_failed_log=True
+)
+
+merger.merge()
+```
+
+#### 自动尺寸调整
+```python
+# 使用第一帧的尺寸
+merger = VideoFrameMerger(
+    frame_dirs="frames",
+    output_path="auto_size_video.mp4",
+    fps=25,
+    size=None,  # 自动使用第一帧尺寸
+    fourcc="mp4v"
+)
+
+merger.merge()
+```
+
+### 支持的编码格式
+- **mp4v**: MPEG-4编码，兼容性好
+- **XVID**: Xvid编码，适合AVI格式
+- **MJPG**: Motion JPEG编码，质量高但文件大
+- **H264**: H.264编码，压缩效率高
+
+### 输出文件
+合并过程会生成以下文件：
+- **视频文件**: 合并后的视频
+- **成功日志**: 记录成功处理的帧文件路径
+- **失败日志**: 记录无法读取的帧文件（如果启用）
+
+### 目录结构支持
+支持以下目录结构：
+```
+frames/
+├── batch_1/
+│   ├── frame_000001.jpg
+│   ├── frame_000002.jpg
+│   └── ...
+├── batch_2/
+│   ├── frame_000031.jpg
+│   └── ...
+└── ...
+```
+
 ## 依赖要求
 
 ### class_distillation.py
@@ -477,6 +652,10 @@ dataset_frames/
 - shutil
 - re
 - sympy
+
+### class_frame_to_video.py
+- opencv-python (cv2)
+- pathlib
 
 ## 注意事项
 
@@ -498,11 +677,24 @@ dataset_frames/
    - 输出目录会自动创建
    - 文件名会自动处理特殊字符
 
+3. **视频帧合并模块**：
+   - 确保帧文件按正确顺序命名（建议使用数字序号）
+   - 支持的图像格式：JPG、PNG
+   - 自动处理batch_x子目录结构
+   - 合并前确保有足够的磁盘空间
+   - 不同编码格式的兼容性可能因系统而异
+
 ## 错误处理
 
-- 视频文件无法打开时会抛出RuntimeError
-- FFmpeg命令执行失败时会抛出subprocess.CalledProcessError
-- 确保输出目录有写入权限
+1. **视频帧提取模块**：
+   - 视频文件无法打开时会抛出RuntimeError
+   - FFmpeg命令执行失败时会抛出subprocess.CalledProcessError
+   - 确保输出目录有写入权限
+
+2. **视频帧合并模块**：
+   - 没有找到任何帧文件时会抛出RuntimeError
+   - 帧文件无法读取时会记录到失败日志
+   - 确保输出路径有写入权限
 
 ## 性能建议
 
@@ -510,7 +702,12 @@ dataset_frames/
    - 对于大视频文件，建议使用OpenCV模式并设置合适的batch_size
    - 根据存储空间和提取速度需求选择合适的图像格式和质量
 
-2. **知识蒸馏训练**：
+2. **视频帧合并模块**：
+   - 对于大量帧文件，建议使用高效的编码格式（如H264）
+   - 合并前检查帧文件完整性，避免处理损坏的文件
+   - 使用SSD存储可以提高合并速度
+
+3. **知识蒸馏训练**：
    - **温度策略**：建议先用较高的temperature值（6-8）进行预热，然后逐渐降低到2-4
    - **损失权重调度**：训练初期更注重任务损失（beta=0.7），后期更注重蒸馏损失（alpha=0.7）
    - **特征蒸馏优化**：
