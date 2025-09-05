@@ -90,7 +90,7 @@ class OutputManager:
         }
 
     # save model
-    def save_model(self, model, epoch: int, metrics:Dict, is_best: bool = False):
+    def save_model(self, model, epoch: int, metrics:Dict, is_best: bool = False, model_suffix: str = ""):
         checkpoint = { # Create a checkpoint dictionary
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -99,13 +99,17 @@ class OutputManager:
             'is_best': is_best
         }
 
+        # 构建文件名，支持model_suffix
+        model_name = f"{self.model_type}_{model_suffix}" if model_suffix else self.model_type
+
         # save every checkpoint
         epoch_path = os.path.join(
             self.get_checkpoints_dir(),
-            f"{self.model_type}_epoch_{epoch:03d}.pth"
+            f"{model_name}_epoch_{epoch:03d}.pth"
         )
         torch.save(checkpoint, epoch_path)
-        print(f"✓ Saved checkpoint: {os.path.basename(epoch_path)}")
+        suffix_info = f" ({model_suffix})" if model_suffix else ""
+        print(f"✓ Saved checkpoint{suffix_info}: {os.path.basename(epoch_path)}")
 
         # if best, save a copy as best
         if is_best:
@@ -114,10 +118,10 @@ class OutputManager:
             
             best_path = os.path.join(
                 self.get_checkpoints_dir(),
-                f"{self.model_type}_best.pth"
+                f"{model_name}_best.pth"
             )
             torch.save(best_checkpoint, best_path)
-            print(f"BEST: Saved best model: {os.path.basename(best_path)}")
+            print(f"BEST: Saved best model{suffix_info}: {os.path.basename(best_path)}")
             
             # update best model record
             self._update_best_model_record(epoch, metrics, best_path)
@@ -129,7 +133,8 @@ class OutputManager:
     # save checkpoint by interval
     def save_checkpoint_if_needed(self, model, epoch: int, metrics: Dict, 
                                 current_best_metric: float, metric_name: str = 'val_loss',
-                                minimize: bool = True, save_interval: int = 5):
+                                minimize: bool = True, save_interval: int = 5, 
+                                model_suffix: str = "", save_best: bool = True):
         """
         智能保存checkpoint，自动判断是否为最佳模型
         Args:
@@ -140,32 +145,36 @@ class OutputManager:
             metric_name: 用于判断的指标名称
             minimize: True表示指标越小越好，False表示越大越好
             save_interval: 常规保存间隔
+            model_suffix: 模型后缀（如"teacher", "student"）
+            save_best: 是否保存最佳模型
         """
         current_metric = metrics.get(metric_name)
         if current_metric is None:
             print(f"Metric '{metric_name}' not found in metrics")
-            return self.save_model(model, epoch, metrics, is_best=False), current_best_metric
+            return self.save_model(model, epoch, metrics, is_best=False, model_suffix=model_suffix), current_best_metric
         
         # check if best
         is_best = False
         new_best_metric = current_best_metric
 
-        if minimize: # switch metric valuation standard by minimize
-            if current_metric < current_best_metric:
-                is_best = True
-                new_best_metric = current_metric
-        else:
-            if current_metric > current_best_metric: # such as acc, the greater the better
-                is_best = True
-                new_best_metric = current_metric
+        if save_best:  # 只有当save_best=True时才判断是否为最佳模型
+            if minimize: # switch metric valuation standard by minimize
+                if current_metric < current_best_metric:
+                    is_best = True
+                    new_best_metric = current_metric
+            else:
+                if current_metric > current_best_metric: # such as acc, the greater the better
+                    is_best = True
+                    new_best_metric = current_metric
 
         # save the model
-        saved_path = self.save_model(model, epoch, metrics, is_best=is_best)
+        saved_path = self.save_model(model, epoch, metrics, is_best=is_best, model_suffix=model_suffix)
 
-        if is_best:
+        if is_best and save_best:
             print(f"BEST: New best model at epoch {epoch} with {metric_name}: {current_metric:.4f}")
         elif epoch % save_interval == 0:
-            print(f"SAVED: Regular checkpoint saved at epoch {epoch}")
+            suffix_info = f" ({model_suffix})" if model_suffix else ""
+            print(f"SAVED: Regular checkpoint{suffix_info} saved at epoch {epoch}")
 
         return saved_path, new_best_metric
 

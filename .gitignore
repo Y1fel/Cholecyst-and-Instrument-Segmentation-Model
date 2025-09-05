@@ -241,3 +241,9 @@ improved_training_config.py
 # 水平集学习相关文档
 WATERSHED_LEARNING_EXPLAINED.md
 WATERSHED_MECHANISM_EXPLAINED.md
+debug_compose_mapping.py
+monitor_kd_losses.py
+test_kd_components.py
+test_teacher_model.py
+test_teacher_student_predictions.png
+test_teacher_student_predictions.py

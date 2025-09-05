@@ -1,0 +1,68 @@
+# /configs/distillation_test_config.yaml
+# 知识蒸馏测试配置文件
+# 小规模训练用于验证蒸馏功能
+
+# === 基础配置 ===
+epochs: 2
+batch_size: 4
+lr: 0.0001
+img_size: 256
+num_workers: 0
+num_classes: 3  # 三分类：background, instrument, target_organ
+
+# === 数据配置 ===
+split: "train"
+binary: false  # 关闭二分类，使用多分类
+val_ratio: 0.3
+monitor_interval: 5
+
+# === 分类配置 ===
+classification_scheme: "3class_org"  # 使用语义对齐的3class_org方案
+target_classes: null
+custom_mapping_file: null
+
+# === 知识蒸馏配置 ===
+enable_distillation: true
+teacher_model: "unet_plus_plus"  # 复杂离线模型作为Teacher
+student_model: "adaptive_unet"   # 轻量在线模型作为Student
+
+# 蒸馏超参数
+distill_temperature: 4.0
+distill_alpha: 0.7      # 蒸馏损失权重
+distill_beta: 0.3       # 任务损失权重
+distill_feature_weight: 0.1
+
+# === 训练阶段 ===
+stage: "offline"
+
+# === 优化器配置 ===
+optimizer: "adamw"
+weight_decay: 0.0001
+scheduler: "cosine"
+sgd_momentum: 0.9
+
+# === 数据增强 ===
+augment: true
+flip_prob: 0.5
+rotation_degree: 15
+
+# === 监控配置 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 10
+
+# === 保存配置 ===
+save_interval: 1
+val_interval: 1
+save_best_only: true
+
+# === 调试配置 ===
+debug: false
+early_stopping: false
+patience: 5
+
+# === 模型特定参数 ===
+model_params:
+  in_channels: 3
+  base_filters: 32
+  dropout: 0.1

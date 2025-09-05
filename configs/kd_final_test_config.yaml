@@ -1,0 +1,67 @@
+# 知识蒸馏(KD)完整测试配置文件
+# 基于实际数据分析结果，使用3class_org方案进行专业医学图像分割
+
+# === 基础训练配置 ===
+epochs: 8               # KD测试用快速训练
+batch_size: 4           # 小batch确保稳定训练
+lr: 0.0001              # 保守学习率
+img_size: 256           # 中等分辨率，平衡效果和速度
+num_workers: 0          # Windows兼容性
+num_classes: 3          # 三分类：background(0), instrument(1), target_organ(2)
+
+# === 数据配置 ===
+split: "train"
+binary: false           # 多分类模式
+val_ratio: 0.2          # 验证集比例
+monitor_interval: 10    # 进度监控间隔
+
+# === 关键：使用修正的分类方案 ===
+classification_scheme: "3class_org"    # 专业医学分割方案
+# 映射说明：
+# - 背景(watershed=50) → 类别0
+# - 器械(watershed=31) → 类别1  
+# - 胆囊(watershed=22) → 类别2
+# - 其他解剖结构 → ignore_index(255)
+
+# === 知识蒸馏核心配置 ===
+enable_distillation: true
+teacher_model: "unet_plus_plus"     # 复杂Teacher模型
+student_model: "adaptive_unet"      # 轻量Student模型
+
+# Teacher预训练权重（示例路径，需要根据第一步实际输出更新）
+# 格式：outputs/unet_plus_plus_<timestamp>/checkpoints/unet_plus_plus_best.pth
+teacher_checkpoint: "outputs/baseline_multi_20250829_193820/checkpoints/baseline_multi_best.pth"  # 使用现有的3class Teacher模型
+
+# 蒸馏超参数（经过优化的设置）
+distill_temperature: 4.0      # 软化Teacher输出
+distill_alpha: 0.7           # 蒸馏损失权重（主要）
+distill_beta: 0.3            # 任务损失权重（次要）
+distill_feature_weight: 0.1   # 特征蒸馏权重
+
+# === 训练策略 ===
+stage: "offline"
+
+# === 优化器配置 ===
+optimizer: "adamw"
+weight_decay: 0.0001
+scheduler: "cosine"
+
+# === 数据增强 ===
+augment: true
+flip_prob: 0.5
+rotation_degree: 10
+
+# === 监控和可视化 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 6
+
+# === 保存策略 ===
+save_interval: 1
+val_interval: 1
+save_best_only: true
+
+# === 调试配置 ===
+debug: false
+early_stopping: false
+patience: 3

@@ -1,0 +1,77 @@
+# /configs/distillation_improved_config.yaml
+# 改进的知识蒸馏配置文件
+# 修复了Teacher权重加载和类别映射问题
+
+# === 基础配置 ===
+epochs: 3
+batch_size: 4
+lr: 0.0001
+img_size: 256
+num_workers: 0
+num_classes: 3  # 三分类：background, instrument, anatomical_structures
+
+# === 数据配置 ===
+split: "train"
+binary: false  # 关闭二分类，使用多分类
+val_ratio: 0.3
+monitor_interval: 5
+
+# === 分类配置 ===
+classification_scheme: "3class_balanced"  # 使用平衡的3类分割方案
+target_classes: null
+custom_mapping_file: null
+
+# === 知识蒸馏配置 ===
+enable_distillation: true
+teacher_model: "unet_plus_plus"  # 复杂离线模型作为Teacher
+student_model: "adaptive_unet"   # 轻量在线模型作为Student
+
+# Teacher预训练权重路径（需要根据实际情况设置）
+# teacher_checkpoint: "outputs/baseline_multi_20250829_193820/checkpoints/best_model.pth"
+
+# 蒸馏超参数
+distill_temperature: 4.0
+distill_alpha: 0.7      # 蒸馏损失权重
+distill_beta: 0.3       # 任务损失权重
+distill_feature_weight: 0.1
+
+# === 训练阶段 ===
+stage: "offline"
+
+# === 优化器配置 ===
+optimizer: "adamw"
+weight_decay: 0.0001
+scheduler: "cosine"
+sgd_momentum: 0.9
+
+# === 数据增强 ===
+augment: true
+flip_prob: 0.5
+rotation_degree: 15
+
+# === 监控配置 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 10
+
+# === 保存配置 ===
+save_interval: 1
+val_interval: 1
+save_best_only: true
+
+# === 调试配置 ===
+debug: false
+early_stopping: false
+patience: 5
+
+# === 模型特定参数 ===
+model_params:
+  in_channels: 3
+  base_filters: 32
+  dropout: 0.1
+
+# === 备注 ===
+# 主要改进：
+# 1. 使用3class_balanced映射避免极端的类别不平衡
+# 2. 添加teacher_checkpoint选项加载预训练权重
+# 3. 更合理的类别定义：背景-器械-解剖结构

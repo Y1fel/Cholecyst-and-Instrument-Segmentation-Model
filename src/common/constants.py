@@ -69,6 +69,25 @@ REGION_SEPARATION_COLORS = {
     9: (255, 192, 203),     # 区域9：粉色
 }
 
+# Watershed灰度值 → 基础语义ID (0..12) 映射表
+# 这是解决标签对齐问题的关键映射
+WATERSHED_TO_BASE_CLASS = {
+    50: 0,   # 背景 (watershed中的灰度值50对应背景)
+    11: 1,   # Abdominal Wall  
+    21: 2,   # Liver
+    13: 3,   # GI Tract
+    12: 4,   # Fat
+    31: 5,   # Instrument: Grasper
+    23: 6,   # Connective Tissue (预留)
+    24: 7,   # Blood (预留)
+    25: 8,   # Cystic Duct (预留)
+    32: 9,   # Instrument: L-hook
+    22: 10,  # Gallbladder
+    33: 11,  # Hepatic Vein (预留)
+    5:  12,  # Liver Ligament (预留)
+    255: 255 # ignore index保持不变
+}
+
 # 基础13类定义（对应Kaggle数据集）
 BASE_CLASSES = {
     0: "background",
@@ -101,12 +120,39 @@ CLASSIFICATION_SCHEMES = {
         "description": "前景(器械+目标器官) vs 背景"
     },
     
-    "3class": {
-        "num_classes": 3, 
-        "target_classes": ["background", "surgical_instrument", "target_organ"],
-        "mapping": {0: 0, 5: 1, 9: 1, 10: 2},  # 背景、器械、目标器官
+    "3class_org": {
+        "num_classes": 3,
+        "target_classes": ["background", "instrument", "target_organ"],
+        "mapping": {
+            0: 0,   # 背景 → 背景
+            5: 1,   # Grasper → 器械
+            9: 1,   # L-hook → 器械  
+            10: 2   # Gallbladder → 目标器官
+        },
+        "default_for_others": 255,  # 关键：未命中的都设为ignore，不是背景！
+        "description": "背景 vs 器械 vs 目标器官（语义对齐版本）"
+    },
+    
+    "3class_balanced": {
+        "num_classes": 3,
+        "target_classes": ["background", "surgical_instrument", "anatomical_structures"], 
+        "mapping": {
+            0: 0,   # background -> background
+            1: 2,   # abdominal_wall -> anatomical_structures
+            2: 2,   # liver -> anatomical_structures
+            3: 2,   # gastrointestinal_tract -> anatomical_structures
+            4: 2,   # fat -> anatomical_structures
+            5: 1,   # grasper -> surgical_instrument
+            6: 2,   # connective_tissue -> anatomical_structures
+            7: 2,   # blood -> anatomical_structures
+            8: 2,   # cystic_duct -> anatomical_structures
+            9: 1,   # l_hook_electrocautery -> surgical_instrument
+            10: 2,  # gallbladder -> anatomical_structures
+            11: 2,  # hepatic_vein -> anatomical_structures
+            12: 2   # liver_ligament -> anatomical_structures
+        },
         "default_for_others": 0,
-        "description": "背景 vs 器械 vs 目标器官"
+        "description": "背景 vs 器械 vs 解剖结构（平衡版本）"
     },
     
     "5class": {
@@ -115,6 +161,22 @@ CLASSIFICATION_SCHEMES = {
         "mapping": {0: 0, 1: 1, 2: 2, 3: 1, 4: 1, 5: 3, 6: 1, 7: 1, 8: 2, 9: 3, 10: 4, 11: 2, 12: 2},
         "default_for_others": 0,
         "description": "背景、组织、肝脏、器械、目标器官"
+    },
+
+    "6class": {
+        "num_classes": 6,
+        "target_classes": ["background", "liver", "fat", "gi_tract", "instrument", "gallbladder"],
+        "mapping": {
+            0: 0,   # 背景
+            2: 1,   # 肝脏
+            4: 2,   # 脂肪
+            3: 3,   # 消化道
+            5: 4,   # Grasper → 器械
+            9: 4,   # L-hook → 器械（合并到同一个器械类）
+            10: 5   # 胆囊
+        },
+        "default_for_others": 255,
+        "description": "6类精细分割：背景-肝脏-脂肪-消化道-器械-胆囊"
     },
     
     "detailed": {
@@ -166,7 +228,7 @@ DATASET_CONFIG = {
     #     11: 11, # Hepatic Vein -> hepatic_vein
     #     12: 12, # Liver Ligament -> liver_ligament
     # },
-    "SEG8K_CLASS_MAPPING": CLASSIFICATION_SCHEMES["3class"]["mapping"],  # use 3-class as default
+    "SEG8K_CLASS_MAPPING": CLASSIFICATION_SCHEMES["3class_org"]["mapping"],  # use 3-class as default
     # {
     #     0: 0,   # Background
     #     1: 1,   # Tissue (Abdominal Wall)
@@ -226,6 +288,41 @@ def generate_class_mapping(
     # Use the preset scheme
     scheme = CLASSIFICATION_SCHEMES[scheme_name]
     return scheme["mapping"], scheme["num_classes"], scheme["target_classes"]
+
+def compose_mapping(classification_scheme=None, custom_mapping=None, target_classes=None):
+    """
+    组合映射函数：生成从watershed灰度值到目标类别ID的完整映射
+    
+    Args:
+        classification_scheme: 预定义的分类方案名称
+        custom_mapping: 自定义映射字典  
+        target_classes: 目标类别列表
+    
+    Returns:
+        dict: {watershed_gray_value: target_class_id}
+    """
+    final_mapping = {}
+    
+    if custom_mapping is not None:
+        # 使用自定义映射
+        return custom_mapping
+    
+    if classification_scheme and classification_scheme in CLASSIFICATION_SCHEMES:
+        scheme = CLASSIFICATION_SCHEMES[classification_scheme]
+        semantic_to_target = scheme['mapping']
+        default_value = scheme.get('default_for_others', 255)
+        
+        # 两阶段映射：watershed → semantic → target
+        for watershed_gray, semantic_id in WATERSHED_TO_BASE_CLASS.items():
+            if semantic_id in semantic_to_target:
+                final_mapping[watershed_gray] = semantic_to_target[semantic_id]
+            else:
+                final_mapping[watershed_gray] = default_value
+        
+        return final_mapping
+    
+    # 默认情况：直接使用watershed到语义的映射
+    return WATERSHED_TO_BASE_CLASS
 
 def generate_selective_mapping(target_classes):
     """根据指定类别生成映射"""

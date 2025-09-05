@@ -62,58 +62,58 @@ def build_model(
         model_name = 'mobile_unet'
 
     # if model_name == 'unet_min':
-    #     print(f"✓ Using UNetMin with {out_ch} output channels")
+    #     print(f"[CHECKED] Using UNetMin with {out_ch} output channels")
     #     return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
     
     # Baseline model
     # UNetMin
     if model_name == 'unet_min':
-        print(f"✓ Using UNetMin with {out_ch} output channels")
+        print(f"[CHECKED] Using UNetMin with {out_ch} output channels")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
     
     # Offline models
     # UNet++
     if model_name == 'unet_plus_plus':
         if UNetPlusPlus is not None:
-            print(f"✓ Using UNet++ with {out_ch} output channels")
+            print(f"[CHECKED] Using UNet++ with {out_ch} output channels")
             return UNetPlusPlus(in_ch=in_ch, num_classes=out_ch, base_ch=base)
         else:
-            print(f"✗ UNet++ not available, falling back to UNetMin")
-            return UNetMin(in_ch=in_ch, num_classes=out_ch, base_ch=base)
+            print(f"[FAILED] UNet++ not available, falling back to UNetMin")
+            return UNetMin(in_ch=in_ch, num_classes=out_ch, base=base)
     
     # DeepLabV3+
     if model_name == 'deeplabv3_plus':
         if DeepLabV3Plus is not None:
-            print(f"✓ Using DeepLabV3+ with {out_ch} output channels")
+            print(f"[CHECKED] Using DeepLabV3+ with {out_ch} output channels")
             return DeepLabV3Plus(in_channels=in_ch, num_classes=out_ch)
         else:
-            print(f"✗ DeepLabV3+ not available, falling back to UNetMin")
+            print(f"[FAILED] DeepLabV3+ not available, falling back to UNetMin")
             return UNetMin(in_ch=in_ch, num_classes=out_ch, base=base)
     
     # HRNet
     if model_name == 'hrnet':
         if HRNet is not None:
-            print(f"✓ Using HRNet with {out_ch} output channels")
+            print(f"[CHECKED] Using HRNet with {out_ch} output channels")
             return HRNet(in_channels=in_ch, num_classes=out_ch)
         else:
-            print(f"✗ HRNet not available, falling back to UNetMin")
+            print(f"[FAILED] HRNet not available, falling back to UNetMin")
             return UNetMin(in_ch=in_ch, num_classes=out_ch, base=base)
     
     # Online models
     # MobileUNet
     if model_name == 'mobile_unet' and MobileUNet is not None:
-        print(f"✓ Using MobileUNet with {out_ch} output channels")
+        print(f"[CHECKED] Using MobileUNet with {out_ch} output channels")
         return MobileUNet(n_channels = in_ch, n_classes = out_ch)
     elif model_name == 'mobile_unet':
-        print(f"✗ MobileUNet not available, falling back to UNetMin")
+        print(f"[FAILED] MobileUNet not available, falling back to UNetMin")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
 
     # AdaptiveUNet
     if model_name == 'adaptive_unet' and AdaptiveUNet is not None:
-        print(f"✓ Using AdaptiveUNet with {out_ch} output channels")
+        print(f"[CHECKED] Using AdaptiveUNet with {out_ch} output channels")
         return AdaptiveUNet(in_channels = in_ch, out_channels = out_ch, init_features = base)
     elif model_name == 'adaptive_unet':
-        print(f"✗ AdaptiveUNet not available, falling back to UNetMin")
+        print(f"[FAILED] AdaptiveUNet not available, falling back to UNetMin")
         return UNetMin(in_ch = in_ch, num_classes = out_ch, base = base)
 
     
@@ -187,7 +187,7 @@ def print_model_summary():
     for stage, models in status.items():
         print(f"\n-- {stage.upper()} MODELS --")
         for model_name, model_info in models.items():
-            status_icon = "✓" if model_info['available'] else "✗"
+            status_icon = "[CHECKED]" if model_info['available'] else "[FAILED]"
             complexity = model_info['config'].get('complexity', 'N/A')
             description = model_info['config'].get('description', 'No description')
             print(f"   {status_icon} {model_name:15} | {complexity:6} | {description}")
