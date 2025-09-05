@@ -6,13 +6,17 @@
 import os, glob, cv2, numpy as np, torch
 from torch.utils.data import Dataset
 from src.common.constants import DATASET_CONFIG
+from src.common.constants import generate_class_mapping, CLASSIFICATION_SCHEMES
 
 # 
 class SegDatasetMin(Dataset):
     def __init__(self, data_root: str, dtype: str = "train", img_size: int = 512,
-            return_multiclass: bool = False,
-            class_id_map: dict | None = None,
-            ignore_index: int = 255
+            return_multiclass: bool    = False,
+            classification_scheme: str = None,
+            custom_mapping: dict       = None,
+            target_classes: list       = None,
+            class_id_map: dict | None  = None,
+            ignore_index: int          = 255
         ):
 
         self.data_root = os.path.abspath(data_root)
@@ -24,14 +28,31 @@ class SegDatasetMin(Dataset):
 
         self.class_id_map = class_id_map or DATASET_CONFIG["SEG8K_CLASS_MAPPING"]
 
-        # get dataset specific for seg8k (for current baseline, and offline in later process)
-        # 
-        pattern_img = DATASET_CONFIG["SEG8K_IMAGE_PATTERNS"]
+        if classification_scheme is None:
+            # use default classification scheme
+            if self.return_multiclass:
+                classification_scheme = "3class" # 3-class segmentation by default for multi-class
+            else:
+                classification_scheme = "binary"
 
-        # 
+        self.mapping, self.num_classes, self.class_names = generate_class_mapping(
+            scheme_name    = classification_scheme, 
+            custom_mapping = self.class_id_map, 
+            target_classes = self.target_classes
+        )
+
+        # update class id mapping to dynamic mapping
+        if custom_mapping or target_classes or classification_scheme != "binary":
+            self.class_id_map = self.mapping
+        
+        # store classification info
+        self.classification_scheme = classification_scheme
+        self.is_binary = (classification_scheme == "binary")
+
+        # get dataset specific for seg8k (for current baseline, and offline in later process)
+        pattern_img = DATASET_CONFIG["SEG8K_IMAGE_PATTERNS"]
         cand_imgs = []
 
-        #
         for each in pattern_img:
             cand_imgs.extend(
                 glob.glob(
@@ -79,11 +100,15 @@ class SegDatasetMin(Dataset):
                 mask_types['original'] = mask_types.get('original', 0) + 1
         
         print(f"-- Dataset loaded: {len(self.pairs)} image-mask pairs")
-        if self.return_multiclass:
+        print(f"-- Classification scheme: {self.classification_scheme} ({self.num_classes} classes)")
+        print(f"-- Target classes: {self.class_names}")
+        if not self.is_binary:
             print(f"-- Multi-class mode: Watershed regions → training class mapping")
+            print(f"   Semantic mapping to {self.num_classes} classes")
         else:
             print(f"-- Binary mode: target + instrument vs background")
-        
+            print(f"    {self.class_names[1]} vs {self.class_names[0]}")
+
         dominant_type = max(mask_types, key=mask_types.get) if mask_types else 'unknown'
         print(f"-- Dominant mask type: {dominant_type} ({mask_types.get(dominant_type, 0)}/{min(20, len(self.pairs))} samples)")
         print(f"-- Image size: {self.img_size}x{self.img_size}")
@@ -127,32 +152,42 @@ class SegDatasetMin(Dataset):
             if index < 3:  # 只显示前3个样本的详细信息
                 print(f"[SINGLE_CH] 使用单通道mask: {os.path.basename(mask_path)}")
 
-        if self.return_multiclass:
+        if not self.is_binary:
             # 多类：根据 class_id_map 做 ID 映射，未知值 -> ignore_index
             m = np.full_like(mask, fill_value=self.ignore_index, dtype=np.uint8)
 
             # 检查是否使用watershed mask
-            if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
+            # if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
                 # Watershed处理：重新编号区域ID
-                unique_regions = np.unique(mask)
-                region_mapping = {}
+                # unique_regions = np.unique(mask)
+                # region_mapping = {}
                 
                 # 背景始终为0
-                region_mapping[0] = 0
+                # region_mapping[0] = 0
                 
                 # 其他区域重新编号为1, 2, 3...
-                class_id = 1
-                for region_id in unique_regions:
-                    if region_id != 0 and region_id != 255 and class_id < 10:  # 跳过背景和ignore_index
-                        region_mapping[region_id] = class_id
-                        class_id += 1
+                # class_id = 1
+                # for region_id in unique_regions:
+                #     if region_id != 0 and region_id != 255 and class_id < 10:  # 跳过背景和ignore_index
+                #         region_mapping[region_id] = class_id
+                #         class_id += 1
                 
                 # 应用映射
-                for original_id, new_id in region_mapping.items():
-                    m[mask == original_id] = new_id
-                
-                # 保持ignore_index不变
-                m[mask == 255] = self.ignore_index
+                # for original_id, new_id in region_mapping.items():
+                #     m[mask == original_id] = new_id
+
+                # Watershed processing: use semantic mapping instead of dynamic re-indexing
+            for mask_id, train_class in self.class_id_map.items():
+                m[mask == mask_id] = train_class
+
+            # dealing unmapping value
+            if hasattr(self, 'mapping') and 'default_for_others' in CLASSIFICATION_SCHEMES.get(self.classification_scheme, {}):
+                default_val   = CLASSIFICATION_SCHEMES[self.classification_scheme]['default_for_others']
+                unmapped_mask = (m == self.ignore_index) & (mask != 255)
+                m[unmapped_mask] = default_val
+
+            # 保持ignore_index不变
+            m[mask == 255] = self.ignore_index
                 
                 # 只显示前5个样本的详细信息，之后只显示简化版本
                 # if index < 5:
@@ -161,30 +196,33 @@ class SegDatasetMin(Dataset):
                 #     print(f"  [WATERSHED] 后续样本区域编号将静默处理...")
 
             # 检查是否使用精确GT  
-            elif os.path.basename(mask_path).endswith('_precise_gt.png'):
-                # 精确GT：直接使用，不需要重新映射
-                from src.common.constants import DATASET_CONFIG
-                if "PRECISE_GT_CLASS_MAPPING" in DATASET_CONFIG:
-                    precise_mapping = DATASET_CONFIG["PRECISE_GT_CLASS_MAPPING"]
-                    for mask_id, train_name in precise_mapping.items():
-                        m[mask == mask_id] = train_name
-                    if index < 3:
-                        # print(f"  [PRECISE_GT] 直接使用精确类别映射")
-                        pass
-                else:
-                    # 如果没有精确映射，使用原始映射
-                    for mask_id, train_name in self.class_id_map.items():
-                        m[mask == mask_id] = train_name
-                    if index < 3:
-                        # print(f"  [PRECISE_GT] 使用原始类别映射")
-                        pass
-            else:
-                # 原始mask：使用原有映射逻辑
-                for mask_id, train_name in self.class_id_map.items():
-                    m[mask == mask_id] = train_name
-                if index < 3:
-                    # print(f"  [ORIGINAL] 使用原始类别映射")
-                    pass
+            # elif os.path.basename(mask_path).endswith('_precise_gt.png'):
+            #     # 精确GT：直接使用，不需要重新映射
+            #     from src.common.constants import DATASET_CONFIG
+            #     if "PRECISE_GT_CLASS_MAPPING" in DATASET_CONFIG:
+            #         precise_mapping = DATASET_CONFIG["PRECISE_GT_CLASS_MAPPING"]
+            #         for mask_id, train_name in precise_mapping.items():
+            #             m[mask == mask_id] = train_name
+            #         if index < 3:
+            #             # print(f"  [PRECISE_GT] 直接使用精确类别映射")
+            #             pass
+            #     else:
+            #         # 如果没有精确映射，使用原始映射
+            #         for mask_id, train_name in self.class_id_map.items():
+            #             m[mask == mask_id] = train_name
+            #         if index < 3:
+            #             # print(f"  [PRECISE_GT] 使用原始类别映射")
+            #             pass
+            # else:
+            #     # 原始mask：使用原有映射逻辑
+            #     for mask_id, train_name in self.class_id_map.items():
+            #         m[mask == mask_id] = train_name
+            #     # 保持ignore_index不变
+            #     m[mask == 255] = self.ignore_index
+
+            #     if index < 3:
+            #         # print(f"  [ORIGINAL] 使用原始类别映射")
+            #         pass
             
             # 最近邻缩放，保持离散标签不被污染
             m           = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
@@ -192,34 +230,47 @@ class SegDatasetMin(Dataset):
             img_tensor  = torch.from_numpy(img).float()     # [3, H, W] for input to model
 
             # sanity check - 只显示前5个样本的详细信息
-            if index < 5:
-                unique = np.unique(m[m != self.ignore_index])
-                # 检测mask类型
-                if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
-                    mask_type = "WATERSHED"
-                elif os.path.basename(mask_path).endswith('_precise_gt.png'):
-                    mask_type = "PRECISE_GT"  
-                else:
-                    mask_type = "ORIGINAL"
-                # print(f"[MC] Sample {index} ({mask_type}): classes={unique.tolist()} (ignore {self.ignore_index})")
-            elif index == 5:
-                # print(f"[MC] 数据加载正常，后续样本将静默处理...")
-                pass
+            # if index < 5:
+            #     unique = np.unique(m[m != self.ignore_index])
+            #     # 检测mask类型
+            #     if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
+            #         mask_type = "WATERSHED"
+            #     elif os.path.basename(mask_path).endswith('_precise_gt.png'):
+            #         mask_type = "PRECISE_GT"  
+            #     else:
+            #         mask_type = "ORIGINAL"
+            #     # print(f"[MC] Sample {index} ({mask_type}): classes={unique.tolist()} (ignore {self.ignore_index})")
+            # elif index == 5:
+            #     # print(f"[MC] 数据加载正常，后续样本将静默处理...")
+            #     pass
             return img_tensor, mask_tensor
         else:
             # binary
-            fg = ((mask == 12) | (mask == 13) | (mask == 21) | (mask == 22)).astype(np.uint8)  # 胆囊+器械
+            # 器械：Class 5 (Grasper) + Class 9 (L-hook) 
+            # 胆囊：Class 10 (Gallbladder)
+            if self.classification_scheme == "binary":
+                # 
+                binary_mapping = CLASSIFICATION_SCHEMES["binary"]["mapping"]
+                fg_mask        = np.zeros_like(mask, dtype=np.uint8)
+                # 
+                for original_id, target_class in binary_mapping.items():
+                    if target_class == 1:  # foreground
+                        fg_mask[mask == original_id] = 1
+                fg = fg_mask
+            else:
+                fg = ((mask == 5) | (mask == 9) | (mask == 10)).astype(np.uint8)
+                
             fg = cv2.resize(fg, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
 
             mask_tensor = torch.from_numpy(fg)[None, ...].float()
             img_tensor  = torch.from_numpy(img)
 
-            if index < 5:
-                foreground_ratio = float(fg.mean())
-                # print(f"[BIN] Sample {index}: Foreground ratio={foreground_ratio:.3f}")
-            elif index == 5:
-                # print(f"[BIN] 二分类数据加载正常，后续样本将静默处理...")
-                pass
+            # if index < 5:
+            #     foreground_ratio = float(fg.mean())
+            #     # print(f"[BIN] Sample {index}: Foreground ratio={foreground_ratio:.3f}")
+            # elif index == 5:
+            #     # print(f"[BIN] 二分类数据加载正常，后续样本将静默处理...")
+            #     pass
             return img_tensor, mask_tensor
 
     def _get_multiclass_mask_candidates(self, stem):
@@ -254,8 +305,8 @@ class SegDatasetMin(Dataset):
                     raw_mask = cv2.cvtColor(raw_mask, cv2.COLOR_BGR2GRAY)
                 
                 # 应用胆囊+器械策略
-                processed_mask = ((raw_mask == 12) | (raw_mask == 13) | (raw_mask == 21) | (raw_mask == 22)).astype(np.uint8)
-                
+                processed_mask = ((raw_mask == 5) | (raw_mask == 9) | (raw_mask == 10)).astype(np.uint8)
+
                 foreground_ratio = processed_mask.mean()
                 foreground_ratios.append(foreground_ratio)
                 

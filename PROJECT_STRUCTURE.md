@@ -507,14 +507,14 @@ outputs/
 
 #### 基础训练
 ```bash
-# 最简训练（推荐新手）
+# 最简训练
 python src/training/offline/train_offline_universal.py \
   --data_root "data/seg8k" \
   --binary \
   --epochs 3 \
   --batch_size 4
 
-# 全功能训练（推荐进阶）
+# 全功能训练
 python src/training/offline/train_offline_universal.py \
   --data_root "data/seg8k" \
   --model adaptive_unet \

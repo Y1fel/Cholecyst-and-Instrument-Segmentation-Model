@@ -53,3 +53,8 @@ model_params:
   in_channels: 3
   base_filters: 32
   dropout: 0.1
+
+# 添加分类配置
+classification_scheme: "3class"    # 使用3类分割作为默认
+target_classes: null              # 不使用指定类别
+custom_mapping_file: null         # 不使用自定义映射文件

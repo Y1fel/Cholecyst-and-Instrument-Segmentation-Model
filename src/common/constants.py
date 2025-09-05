@@ -69,6 +69,63 @@ REGION_SEPARATION_COLORS = {
     9: (255, 192, 203),     # 区域9：粉色
 }
 
+# 基础13类定义（对应Kaggle数据集）
+BASE_CLASSES = {
+    0: "background",
+    1: "abdominal_wall", 
+    2: "liver",
+    3: "gastrointestinal_tract",
+    4: "fat",
+    5: "grasper",
+    6: "connective_tissue", 
+    7: "blood",
+    8: "cystic_duct",
+    9: "l_hook_electrocautery",
+    10: "gallbladder",  # 当前目标器官
+    11: "hepatic_vein",
+    12: "liver_ligament",
+    # 预留扩展槽位
+    13: "target_organ_2",  # 为其他器官预留
+    14: "target_organ_3",
+    15: "instrument_3",    # 为其他器械预留
+    16: "instrument_4"
+}
+
+# 分类方案定义
+CLASSIFICATION_SCHEMES = {
+    "binary": {
+        "num_classes": 2,
+        "target_classes": ["background", "foreground"],
+        "mapping": {0: 0, 5: 1, 9: 1, 10: 1},  # 器械+目标器官=前景
+        "default_for_others": 0,
+        "description": "前景(器械+目标器官) vs 背景"
+    },
+    
+    "3class": {
+        "num_classes": 3, 
+        "target_classes": ["background", "surgical_instrument", "target_organ"],
+        "mapping": {0: 0, 5: 1, 9: 1, 10: 2},  # 背景、器械、目标器官
+        "default_for_others": 0,
+        "description": "背景 vs 器械 vs 目标器官"
+    },
+    
+    "5class": {
+        "num_classes": 5,
+        "target_classes": ["background", "tissue", "liver", "surgical_instrument", "target_organ"],
+        "mapping": {0: 0, 1: 1, 2: 2, 3: 1, 4: 1, 5: 3, 6: 1, 7: 1, 8: 2, 9: 3, 10: 4, 11: 2, 12: 2},
+        "default_for_others": 0,
+        "description": "背景、组织、肝脏、器械、目标器官"
+    },
+    
+    "detailed": {
+        "num_classes": 13,
+        "target_classes": list(BASE_CLASSES.values())[:13],
+        "mapping": {i: i for i in range(13)},
+        "default_for_others": 255,  # ignore_index
+        "description": "完整13类分割（Kaggle标准）"
+    }
+}
+
 # 数据集配置
 DATASET_CONFIG = {
     # seg8k数据集的图像模式
@@ -93,14 +150,38 @@ DATASET_CONFIG = {
         "_endo_watershed_mask.png"
     ],
     
-    # 类别ID映射
-    "SEG8K_CLASS_MAPPING": {
-        0: 0,   # background
-        12: 1,  # instrument_1  
-        13: 1,  # instrument_2
-        21: 2,  # target_organ_1
-        22: 2   # target_organ_2
-    },
+    # 类别ID映射 详细版无语义损失
+    # "SEG8K_CLASS_MAPPING": {
+    #     0: 0,   # Black Background -> background
+    #     1: 1,   # Abdominal Wall -> abdominal_wall  
+    #     2: 2,   # Liver -> liver
+    #     3: 3,   # Gastrointestinal Tract -> gastrointestinal
+    #     4: 4,   # Fat -> fat
+    #     5: 5,   # Grasper -> instrument (器械1)
+    #     6: 6,   # Connective Tissue -> connective_tissue
+    #     7: 7,   # Blood -> blood
+    #     8: 8,   # Cystic Duct -> cystic_duct
+    #     9: 5,   # L-hook Electrocautery -> instrument (器械2，合并到类别5)
+    #     10: 10, # Gallbladder -> gallbladder (胆囊)
+    #     11: 11, # Hepatic Vein -> hepatic_vein
+    #     12: 12, # Liver Ligament -> liver_ligament
+    # },
+    "SEG8K_CLASS_MAPPING": CLASSIFICATION_SCHEMES["3class"]["mapping"],  # use 3-class as default
+    # {
+    #     0: 0,   # Background
+    #     1: 1,   # Tissue (Abdominal Wall)
+    #     2: 2,   # Liver  
+    #     3: 1,   # Gastrointestinal -> Tissue
+    #     4: 1,   # Fat -> Tissue
+    #     5: 3,   # Grasper -> Instrument
+    #     6: 1,   # Connective Tissue -> Tissue
+    #     7: 1,   # Blood -> Tissue  
+    #     8: 2,   # Cystic Duct -> Liver
+    #     9: 3,   # L-hook Electrocautery -> Instrument
+    #     10: 4,  # Gallbladder -> Gallbladder
+    #     11: 2,  # Hepatic Vein -> Liver
+    #     12: 2,  # Liver Ligament -> Liver
+    # },
     
     # 精确GT类别映射（已经是正确的类别ID）
     "PRECISE_GT_CLASS_MAPPING": {
@@ -109,3 +190,56 @@ DATASET_CONFIG = {
         2: 2    # target_organ -> target_organ
     }
 }
+
+def generate_class_mapping(
+    scheme_name = "3class",
+    custom_mapping = None,
+    target_classes = None
+):
+    """
+    动态生成类别映射
+    Args:
+        scheme_name: 预设方案名
+        custom_mapping: 自定义映射字典
+        target_classes: 指定类别列表
+    Returns:
+        mapping: 类别映射字典
+        num_classes: 类别数量
+        class_names: 类别名称列表
+    """
+    if custom_mapping:
+        # use custom mapping
+        mapping = custom_mapping
+        num_classes = len(set(mapping.values()))
+        class_names = [f"class_{i}" for i in range(num_classes)]
+        return mapping, num_classes, class_names
+    
+    if target_classes:
+        # use target classes
+        mapping = generate_class_mapping(target_classes=target_classes)
+        num_classes = len(target_classes)
+        class_names = target_classes
+        return mapping, num_classes, class_names
+    
+    if scheme_name not in CLASSIFICATION_SCHEMES:
+        raise ValueError(f"Unknown scheme: {scheme_name}. Available: {list(CLASSIFICATION_SCHEMES.keys())}")
+    # Use the preset scheme
+    scheme = CLASSIFICATION_SCHEMES[scheme_name]
+    return scheme["mapping"], scheme["num_classes"], scheme["target_classes"]
+
+def generate_selective_mapping(target_classes):
+    """根据指定类别生成映射"""
+    # 预留接口，暂不实现
+    pass
+
+# 验证接口（预留）
+def validate_classification_config(scheme_name, mapping, dataset_sample=None):
+    """验证分类配置的有效性"""
+    # 预留验证接口
+    pass
+
+def validate_class_distribution(dataset, mapping):
+    """验证类别分布"""
+    # 预留验证接口  
+    pass
+

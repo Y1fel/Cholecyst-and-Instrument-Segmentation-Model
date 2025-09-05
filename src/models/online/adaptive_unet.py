@@ -141,4 +141,5 @@ class AdaptiveUNet(nn.Module):
         dec1 = self.decoder1(dec1)
         dec1 = self.decoder_adapter1(dec1)
 
-        return torch.sigmoid(self.conv(dec1))
+        # return torch.sigmoid(self.conv(dec1))
+        return self.conv(dec1)
