@@ -97,3 +97,72 @@ class DistillationLoss(nn.Module):
                 student_feat = student_features[i]
             feature_loss += self.feature_loss(student_feat, teacher_features[i])
         return feature_loss / min_len
+
+# 伪标签方法
+class PseudoLabelLoss(nn.Module):
+    def __init__(self,
+                 num_classes: int = 2,
+                 use_soft: bool = False,
+                 confidence_threshold: float = 0.7):
+        """
+        Args:
+            num_classes: 类别数 (2 = 二分类, >2 = 多分类)
+            use_soft: 是否使用软伪标签 (False = 硬标签CE, True = soft标签)
+            confidence_threshold: 伪标签置信度阈值, 低于阈值的样本不算损失
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.use_soft = use_soft
+        self.confidence_threshold = confidence_threshold
+
+        if num_classes == 2:
+            self.ce_loss = nn.BCEWithLogitsLoss(reduction="none")
+        else:
+            self.ce_loss = nn.CrossEntropyLoss(reduction="none")
+
+    def forward(self,
+                student_outputs: torch.Tensor,
+                teacher_outputs: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """计算伪标签损失"""
+
+        if self.num_classes == 2:
+            # teacher_probs: [N, 2]
+            teacher_probs = torch.sigmoid(teacher_outputs)
+            student_logits = student_outputs.view(-1)
+
+            if self.use_soft:
+                # ========= 软伪标签 =========
+                pseudo_labels = teacher_probs.detach()
+                # BCE with soft targets
+                loss = F.binary_cross_entropy_with_logits(
+                    student_logits, pseudo_labels.view(-1), reduction="none"
+                )
+            else:
+                # ========= 硬伪标签 =========
+                pseudo_labels = (teacher_probs > 0.5).float()
+                loss = self.ce_loss(student_logits, pseudo_labels.view(-1))
+        else:
+            # 多分类
+            teacher_probs = F.softmax(teacher_outputs, dim=1)
+
+            if self.use_soft:
+                # ========= 软伪标签 =========
+                pseudo_labels = teacher_probs.detach()
+                student_log_probs = F.log_softmax(student_outputs, dim=1)
+                # soft CE (相当于 KL + 常数)
+                loss = -(pseudo_labels * student_log_probs).sum(dim=1)
+            else:
+                # ========= 硬伪标签 =========
+                conf, pseudo_labels = torch.max(teacher_probs, dim=1)
+                loss = self.ce_loss(student_outputs, pseudo_labels)
+
+                # 筛掉低置信度伪标签
+                mask = conf >= self.confidence_threshold
+                if mask.sum() > 0:
+                    loss = loss[mask]
+                else:
+                    loss = torch.tensor(0.0, device=student_outputs.device)
+
+        return {
+            "pseudo_loss": loss.mean()
+        }
