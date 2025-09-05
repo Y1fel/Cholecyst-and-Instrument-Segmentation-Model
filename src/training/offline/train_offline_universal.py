@@ -6,7 +6,7 @@
 
 # $env:PYTHONPATH="F:\Documents\Courses\CIS\Cholecyst-and-Instrument-Segmentation-Model"
 
-import os, argparse, yaml, torch, sys
+import os, argparse, yaml, torch, sys, json
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -57,6 +57,17 @@ def parse_args():
     # 任务定义
     p.add_argument("--binary", action="store_true",
                    help="二分类（胆囊+器械=前景=1）。若关闭则按多类训练。")
+     # 灵活分类配置
+    p.add_argument("--classification_scheme", type=str, default=None,
+                   choices=["binary", "3class", "5class", "detailed", "custom"],
+                   help="分类方案：binary(2类), 3class(3类), 5class(5类), detailed(13类), custom(自定义)")
+    
+    p.add_argument("--target_classes", nargs="+", default=None,
+                   help="指定目标类别列表，例如：--target_classes background instrument target_organ")
+    
+    p.add_argument("--custom_mapping_file", type=str, default=None,
+                   help="自定义映射JSON文件路径")
+    
     p.add_argument("--num_classes", type=int, default=10,
                    help="多类时>=2；--binary 生效时忽略此项。watershed模式建议使用10。")
     
@@ -273,11 +284,11 @@ def train_one_epoch(
 
         # Forward pass: images -> logits
         if args.binary:
-            loss = criterion(logits, masks)
+            loss = criterion(logits, masks) # BCEWithLogitsLoss(logits, targets)
         else:
             targets = masks.long()
-            if logits.shape[1] == 1:
-                raise RuntimeError("Multiclass training requires model output C>1")
+            # if logits.shape[1] == 1:
+            #     raise RuntimeError("Multiclass training requires model output C>1")
             loss = criterion(logits, targets)
         
         loss.backward()
@@ -349,11 +360,25 @@ def main():
     output_mgr = OutputManager(model_type=model_tag)
     output_mgr.save_config(vars(args))
 
+    # 
+    custom_mapping = None
+    if args.custom_mapping_file:
+        with open(args.custom_mapping_file, 'r') as f:
+            custom_mapping = json.load(f)
+
+    # Dataset configuration
+    dataset_config = {
+        "classification_scheme": args.classification_scheme,
+        "custom_mapping": custom_mapping,
+        "target_classes": args.target_classes,
+        "return_multiclass": is_multiclass # 保持兼容性
+    }
+
     # Dataloader
     is_multiclass = (not args.binary) and (args.num_classes >= 2)
     full_dataset = SegDatasetMin(
         args.data_root, dtype=args.split, img_size=args.img_size,
-        return_multiclass=is_multiclass    
+        **dataset_config
     )
 
     # split ratio

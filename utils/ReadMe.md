@@ -1,278 +1,527 @@
 # Utils 工具类说明文档
 
-本目录包含项目中的实用工具类，主要用于知识蒸馏和视频帧提取功能。
+本目录包含了项目中使用的工具类，主要用于知识蒸馏和视频帧提取功能。
 
-## 📁 文件结构
+## 文件结构
 
 ```
 utils/
-├── ReadMe.md                    # 本说明文档
-├── class_distillation.py        # 知识蒸馏相关类
-└── class_frame_extractor.py     # 视频帧提取工具类
+├── class_distillation.py    # 知识蒸馏损失函数
+├── class_frame_extractor.py # 视频帧提取器
+└── README.md               # 本说明文档
 ```
 
-## 🔧 类文件详细说明
+## 1. 知识蒸馏模块 (class_distillation.py)
 
-### 1. class_distillation.py - 知识蒸馏模块
+### 功能概述
+实现了用于模型知识蒸馏的损失函数，支持教师-学生模型的知识传递，包括任务损失、蒸馏损失和特征蒸馏损失。
 
-#### 概述
-该文件包含用于知识蒸馏的两个核心类：`DistillationLoss` 和 `FeatureExtractor`，用于实现教师模型向学生模型的知识迁移。
+### 主要类
 
-#### DistillationLoss 类
+#### DistillationLoss
+知识蒸馏损失函数类，支持二分类和多分类任务。
 
-**功能**：实现知识蒸馏损失函数，结合任务损失、蒸馏损失和特征蒸馏损失。
+**初始化参数：**
+- `num_classes` (int): 类别数，默认为2（二分类）
+- `temperature` (float): 蒸馏温度，默认为4.0
+- `alpha` (float): 蒸馏损失权重，默认为0.7
+- `beta` (float): 任务损失权重，默认为0.3
+- `feature_weight` (float): 特征蒸馏损失权重，默认为0.1
 
-**主要参数**：
-- `temperature` (float): 蒸馏温度，控制知识迁移的"软度"（默认4.0）
-- `alpha` (float): 蒸馏损失权重（默认0.7）
-- `beta` (float): 任务损失权重（默认0.3）
-- `feature_weight` (float): 特征蒸馏权重（默认0.1）
+**主要方法：**
 
-**损失组成**：
-1. **任务损失** (BCE Loss): 学生模型输出与真实标签之间的损失
-2. **蒸馏损失** (KL Divergence): 学生模型与教师模型输出之间的损失
-3. **特征蒸馏损失** (MSE Loss): 中间特征层之间的损失
+##### `forward(student_outputs, teacher_outputs, targets, student_features=None, teacher_features=None)`
+计算蒸馏总损失
 
-**使用示例**：
+**参数：**
+- `student_outputs` (torch.Tensor): 学生模型输出
+- `teacher_outputs` (torch.Tensor): 教师模型输出
+- `targets` (torch.Tensor): 真实标签
+- `student_features` (Optional[List[torch.Tensor]]): 学生模型中间特征
+- `teacher_features` (Optional[List[torch.Tensor]]): 教师模型中间特征
+
+**返回值：**
+- `Dict[str, torch.Tensor]`: 包含以下键的字典
+  - `total_loss`: 总损失
+  - `task_loss`: 任务损失
+  - `distill_loss`: 蒸馏损失
+  - `feature_loss`: 特征蒸馏损失
+
+### 使用示例
+
 ```python
+import torch
 from utils.class_distillation import DistillationLoss
 
-# 创建损失函数
-criterion = DistillationLoss(
+# 创建蒸馏损失函数
+distill_loss = DistillationLoss(
+    num_classes=2,
     temperature=4.0,
     alpha=0.7,
     beta=0.3,
     feature_weight=0.1
 )
 
+# 模拟模型输出
+student_outputs = torch.randn(32, 1)  # 学生模型输出
+teacher_outputs = torch.randn(32, 1)  # 教师模型输出
+targets = torch.randint(0, 2, (32,))  # 真实标签
+
 # 计算损失
-losses = criterion(
-    student_outputs=student_pred,
-    teacher_outputs=teacher_pred,
-    targets=ground_truth,
-    student_features=student_features,
-    teacher_features=teacher_features
+loss_dict = distill_loss(student_outputs, teacher_outputs, targets)
+print(f"总损失: {loss_dict['total_loss']}")
+print(f"任务损失: {loss_dict['task_loss']}")
+print(f"蒸馏损失: {loss_dict['distill_loss']}")
+print(f"特征损失: {loss_dict['feature_loss']}")
+```
+
+### 训练使用指南
+
+#### 1. 基本训练流程
+
+在模型训练中，DistillationLoss通常与教师模型和学生模型配合使用。以下是完整的训练示例：
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from utils.class_distillation import DistillationLoss
+
+# 假设你已经有了教师模型和学生模型
+class TeacherModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # 教师模型定义
+        pass
+    
+    def forward(self, x):
+        # 返回logits和中间特征
+        return logits, features
+
+class StudentModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # 学生模型定义（通常更小）
+        pass
+    
+    def forward(self, x):
+        # 返回logits和中间特征
+        return logits, features
+
+# 初始化模型
+teacher_model = TeacherModel()
+student_model = StudentModel()
+
+# 设置教师模型为评估模式（不更新参数）
+teacher_model.eval()
+for param in teacher_model.parameters():
+    param.requires_grad = False
+
+# 创建蒸馏损失函数
+distill_loss_fn = DistillationLoss(
+    num_classes=2,
+    temperature=4.0,
+    alpha=0.7,      # 蒸馏损失权重
+    beta=0.3,       # 任务损失权重
+    feature_weight=0.1  # 特征蒸馏权重
 )
 
-print(f"总损失: {losses['total_loss']}")
-print(f"任务损失: {losses['task_loss']}")
-print(f"蒸馏损失: {losses['distill_loss']}")
-print(f"特征损失: {losses['feature_loss']}")
+# 优化器（只优化学生模型）
+optimizer = optim.Adam(student_model.parameters(), lr=0.001)
+
+# 训练循环
+def train_epoch(student_model, teacher_model, dataloader, optimizer, distill_loss_fn):
+    student_model.train()
+    
+    total_loss = 0
+    for batch_idx, (data, targets) in enumerate(dataloader):
+        optimizer.zero_grad()
+        
+        # 前向传播
+        with torch.no_grad():
+            teacher_outputs, teacher_features = teacher_model(data)
+        
+        student_outputs, student_features = student_model(data)
+        
+        # 计算蒸馏损失
+        loss_dict = distill_loss_fn(
+            student_outputs=student_outputs,
+            teacher_outputs=teacher_outputs,
+            targets=targets,
+            student_features=student_features,
+            teacher_features=teacher_features
+        )
+        
+        # 反向传播
+        loss_dict['total_loss'].backward()
+        optimizer.step()
+        
+        total_loss += loss_dict['total_loss'].item()
+        
+        # 打印训练信息
+        if batch_idx % 100 == 0:
+            print(f'Batch {batch_idx}, '
+                  f'Total Loss: {loss_dict["total_loss"]:.4f}, '
+                  f'Task Loss: {loss_dict["task_loss"]:.4f}, '
+                  f'Distill Loss: {loss_dict["distill_loss"]:.4f}, '
+                  f'Feature Loss: {loss_dict["feature_loss"]:.4f}')
+    
+    return total_loss / len(dataloader)
 ```
 
-#### FeatureExtractor 类
+#### 2. 多分类任务训练
 
-**功能**：使用PyTorch钩子函数提取模型的中间特征，用于特征蒸馏。
+对于多分类任务（如分割任务），使用方式类似：
 
-**主要方法**：
-- `__init__(model, layer_names)`: 初始化特征提取器
-- `get_features()`: 获取提取的特征列表
-- `clear_features()`: 清除特征缓存
-- `remove_hooks()`: 移除钩子函数，防止内存泄漏
-
-**使用示例**：
 ```python
-from utils.class_distillation import FeatureExtractor
+# 多分类蒸馏损失
+distill_loss_fn = DistillationLoss(
+    num_classes=8,  # 8个类别（如胆囊分割中的不同器官）
+    temperature=3.0,
+    alpha=0.6,
+    beta=0.4,
+    feature_weight=0.05
+)
 
-# 定义要提取的层名称
-layer_names = ['encoder1.1', 'encoder2.1', 'encoder3.1']
-
-# 创建特征提取器
-extractor = FeatureExtractor(model, layer_names)
-
-# 前向传播（自动提取特征）
-output = model(input_data)
-
-# 获取特征
-features = extractor.get_features()
-
-# 清理资源
-extractor.remove_hooks()
+# 训练循环（多分类）
+def train_multiclass_distillation(student_model, teacher_model, dataloader, optimizer, distill_loss_fn):
+    student_model.train()
+    
+    for data, targets in dataloader:
+        optimizer.zero_grad()
+        
+        # 教师模型前向传播（不计算梯度）
+        with torch.no_grad():
+            teacher_outputs, teacher_features = teacher_model(data)
+        
+        # 学生模型前向传播
+        student_outputs, student_features = student_model(data)
+        
+        # 计算损失
+        loss_dict = distill_loss_fn(
+            student_outputs=student_outputs,      # [B, C, H, W]
+            teacher_outputs=teacher_outputs,      # [B, C, H, W]
+            targets=targets,                      # [B, H, W]
+            student_features=student_features,
+            teacher_features=teacher_features
+        )
+        
+        # 反向传播
+        loss_dict['total_loss'].backward()
+        optimizer.step()
+        
+        return loss_dict
 ```
 
-### 2. class_frame_extractor.py - 视频帧提取模块
+#### 3. 渐进式蒸馏训练
 
-#### 概述
-该文件包含 `VideoFrameExtractor` 类，用于从视频文件中提取帧图像，支持多种提取模式和参数配置。
+在实际应用中，可以采用渐进式蒸馏策略：
 
-#### VideoFrameExtractor 类
+```python
+class ProgressiveDistillation:
+    def __init__(self, student_model, teacher_model):
+        self.student_model = student_model
+        self.teacher_model = teacher_model
+        
+        # 不同阶段的蒸馏参数
+        self.distill_configs = [
+            # 阶段1：高温度，重任务损失
+            {'temperature': 8.0, 'alpha': 0.3, 'beta': 0.7, 'feature_weight': 0.0},
+            # 阶段2：中等温度，平衡损失
+            {'temperature': 4.0, 'alpha': 0.5, 'beta': 0.5, 'feature_weight': 0.05},
+            # 阶段3：低温度，重蒸馏损失
+            {'temperature': 2.0, 'alpha': 0.7, 'beta': 0.3, 'feature_weight': 0.1},
+        ]
+    
+    def train_stage(self, stage, dataloader, epochs):
+        config = self.distill_configs[stage]
+        distill_loss_fn = DistillationLoss(
+            num_classes=2,
+            **config
+        )
+        
+        optimizer = optim.Adam(self.student_model.parameters(), lr=0.001)
+        
+        for epoch in range(epochs):
+            avg_loss = train_epoch(
+                self.student_model, 
+                self.teacher_model, 
+                dataloader, 
+                optimizer, 
+                distill_loss_fn
+            )
+            print(f'Stage {stage+1}, Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}')
 
-**功能**：从视频文件中提取帧图像，支持FFmpeg和OpenCV两种提取模式。
+# 使用渐进式蒸馏
+progressive_trainer = ProgressiveDistillation(student_model, teacher_model)
 
-**主要特性**：
-- 支持多种视频格式（mp4, mov, avi, mkv等）
-- 支持FFmpeg和OpenCV两种提取引擎
-- 支持时间范围提取（start/end）
-- 支持帧率控制（fps）
-- 支持图像尺寸调整
-- 支持批量处理（OpenCV模式）
-- 支持多种输出格式（jpg, png等）
+# 分阶段训练
+for stage in range(3):
+    print(f"开始第 {stage+1} 阶段训练...")
+    progressive_trainer.train_stage(stage, train_dataloader, epochs=10)
+```
 
-**主要参数**：
-- `output_dir` (str): 输出目录路径
-- `use_ffmpeg` (bool): 是否优先使用FFmpeg（默认True）
+#### 4. 训练技巧和最佳实践
 
-**extract方法参数**：
+##### 温度调度
+```python
+# 动态调整温度
+def get_temperature(epoch, total_epochs, initial_temp=8.0, final_temp=2.0):
+    return initial_temp * (final_temp / initial_temp) ** (epoch / total_epochs)
+
+# 在训练循环中使用
+for epoch in range(total_epochs):
+    current_temp = get_temperature(epoch, total_epochs)
+    distill_loss_fn = DistillationLoss(
+        num_classes=2,
+        temperature=current_temp,
+        alpha=0.7,
+        beta=0.3,
+        feature_weight=0.1
+    )
+    # ... 训练代码
+```
+
+##### 损失权重调度
+```python
+# 动态调整损失权重
+def get_loss_weights(epoch, total_epochs):
+    # 早期更注重任务损失，后期更注重蒸馏损失
+    alpha = min(0.9, 0.3 + 0.6 * epoch / total_epochs)
+    beta = 1.0 - alpha
+    return alpha, beta
+
+# 使用示例
+for epoch in range(total_epochs):
+    alpha, beta = get_loss_weights(epoch, total_epochs)
+    distill_loss_fn = DistillationLoss(
+        num_classes=2,
+        temperature=4.0,
+        alpha=alpha,
+        beta=beta,
+        feature_weight=0.1
+    )
+```
+
+#### 5. 验证和监控
+
+```python
+def validate_distillation(student_model, teacher_model, val_dataloader, distill_loss_fn):
+    student_model.eval()
+    
+    total_loss = 0
+    total_task_loss = 0
+    total_distill_loss = 0
+    total_feature_loss = 0
+    
+    with torch.no_grad():
+        for data, targets in val_dataloader:
+            # 教师模型输出
+            teacher_outputs, teacher_features = teacher_model(data)
+            
+            # 学生模型输出
+            student_outputs, student_features = student_model(data)
+            
+            # 计算损失
+            loss_dict = distill_loss_fn(
+                student_outputs=student_outputs,
+                teacher_outputs=teacher_outputs,
+                targets=targets,
+                student_features=student_features,
+                teacher_features=teacher_features
+            )
+            
+            total_loss += loss_dict['total_loss'].item()
+            total_task_loss += loss_dict['task_loss'].item()
+            total_distill_loss += loss_dict['distill_loss'].item()
+            total_feature_loss += loss_dict['feature_loss'].item()
+    
+    num_batches = len(val_dataloader)
+    return {
+        'val_total_loss': total_loss / num_batches,
+        'val_task_loss': total_task_loss / num_batches,
+        'val_distill_loss': total_distill_loss / num_batches,
+        'val_feature_loss': total_feature_loss / num_batches
+    }
+```
+
+## 2. 视频帧提取模块 (class_frame_extractor.py)
+
+### 功能概述
+提供视频帧提取功能，支持使用FFmpeg或OpenCV两种方式提取视频帧，支持批量处理和多种输出格式。
+
+### 主要类
+
+#### VideoFrameExtractor
+视频帧提取器类，支持从视频文件中提取指定帧。
+
+**初始化参数：**
+- `output_dir` (str): 输出目录，默认为"frames_out"
+- `use_ffmpeg` (bool): 是否优先使用FFmpeg，默认为True
+
+**主要方法：**
+
+##### `extract(video_path, fps=2.0, every_n=None, start=None, end=None, size=None, fmt="png", jpg_quality=95, batch_size=30, mode=2)`
+从视频中提取帧
+
+**参数：**
 - `video_path` (str): 视频文件路径
-- `fps` (float): 提取帧率（默认2.0）
-- `every_n` (int): 每隔N帧提取一帧
-- `start` (float): 开始时间（秒）
-- `end` (float): 结束时间（秒）
-- `size` (tuple): 输出图像尺寸 (width, height)
-- `fmt` (str): 输出格式（默认"png"）
-- `jpg_quality` (int): JPEG质量（1-100，默认95）
-- `batch_size` (int): 批量大小（OpenCV模式，默认30）
-- `mode` (int): 提取模式（1=FFmpeg, 2=OpenCV，默认2）
+- `fps` (float): 提取帧率，默认为2.0
+- `every_n` (Optional[int]): 每隔n帧提取一次
+- `start` (Optional[float]): 开始时间（秒）
+- `end` (Optional[float]): 结束时间（秒）
+- `size` (Optional[Tuple[int, int]]): 输出图像尺寸
+- `fmt` (str): 输出格式，默认为"png"
+- `jpg_quality` (int): JPEG质量（1-100），默认为95
+- `batch_size` (int): 批处理大小，默认为30
+- `mode` (int): 提取模式，1=FFmpeg，2=OpenCV
 
-**使用示例**：
+**返回值：**
+- `list[str]`: 提取的帧文件路径列表
 
+### 支持的视频格式
+- MP4 (.mp4)
+- MOV (.mov)
+- AVI (.avi)
+- MKV (.mkv)
+- M4V (.m4v)
+- WMV (.wmv)
+- MPG (.mpg)
+- MPEG (.mpeg)
+
+### 使用示例
+
+#### 基本用法
 ```python
 from utils.class_frame_extractor import VideoFrameExtractor
 
 # 创建提取器
 extractor = VideoFrameExtractor(output_dir="dataset_frames")
 
-# 基本提取
+# 提取视频帧
 frames = extractor.extract(
-    video_path="video.mp4",
+    "path/to/video.mp4",
     fps=2,              # 每秒提取2帧
-    size=(512, 512),    # 输出尺寸
-    fmt="jpg",          # 输出格式
-    jpg_quality=90      # JPEG质量
-)
-
-# 时间范围提取
-frames = extractor.extract(
-    video_path="video.mp4",
-    fps=1,              # 每秒1帧
     start=10,           # 从第10秒开始
     end=60,             # 到第60秒结束
-    size=(256, 256),    # 调整尺寸
+    size=(512, 512),    # 输出尺寸512x512
+    fmt="jpg",          # 输出格式为JPEG
+    jpg_quality=90,     # JPEG质量90%
+    batch_size=30,      # 每30帧一个批次
     mode=2              # 使用OpenCV模式
 )
 
-# 批量处理（OpenCV模式）
-frames = extractor.extract(
-    video_path="video.mp4",
-    fps=5,              # 每秒5帧
-    batch_size=50,      # 每50帧一个批次
-    mode=2              # OpenCV模式支持批量
-)
-
 print(f"共提取 {len(frames)} 帧")
-print(f"前5张图片路径: {frames[:5]}")
 ```
 
-#### 提取模式说明
-
-**FFmpeg模式 (mode=1)**：
-- 优点：速度快，内存占用少
-- 缺点：不支持批量处理
-- 适用：大视频文件，快速提取
-
-**OpenCV模式 (mode=2)**：
-- 优点：支持批量处理，更灵活
-- 缺点：速度较慢，内存占用大
-- 适用：需要批量处理的场景
-
-#### 输出结构
-
-**FFmpeg模式输出**：
-```
-output_dir/
-└── video_name/
-    ├── video_name_000001.jpg
-    ├── video_name_000002.jpg
-    └── ...
+#### 使用FFmpeg模式
+```python
+# 使用FFmpeg模式（需要系统安装FFmpeg）
+frames = extractor.extract(
+    "path/to/video.mp4",
+    fps=1.0,            # 每秒1帧
+    size=(1024, 768),   # 输出尺寸
+    fmt="png",          # PNG格式
+    mode=1              # FFmpeg模式
+)
 ```
 
-**OpenCV模式输出**：
+#### 按帧间隔提取
+```python
+# 每隔10帧提取一次
+frames = extractor.extract(
+    "path/to/video.mp4",
+    every_n=10,         # 每隔10帧
+    fmt="jpg",
+    mode=2
+)
 ```
-output_dir/
+
+### 输出目录结构
+
+使用OpenCV模式时，输出目录结构如下：
+```
+dataset_frames/
 └── video_name/
     ├── batch_1/
+    │   ├── video_name_000000.jpg
     │   ├── video_name_000001.jpg
     │   └── ...
     ├── batch_2/
-    │   ├── video_name_000051.jpg
+    │   ├── video_name_000030.jpg
     │   └── ...
     └── ...
 ```
 
-## 🚀 快速开始
-
-### 知识蒸馏使用
-
-```python
-# 1. 导入模块
-from utils.class_distillation import DistillationLoss, FeatureExtractor
-
-# 2. 创建损失函数
-criterion = DistillationLoss(temperature=4.0, alpha=0.7, beta=0.3)
-
-# 3. 创建特征提取器
-extractor = FeatureExtractor(model, ['layer1', 'layer2'])
-
-# 4. 训练循环
-for batch in dataloader:
-    # 前向传播
-    student_output = student_model(batch)
-    teacher_output = teacher_model(batch)
-    
-    # 获取特征
-    features = extractor.get_features()
-    
-    # 计算损失
-    loss = criterion(student_output, teacher_output, targets, features)
-    
-    # 反向传播
-    loss['total_loss'].backward()
+使用FFmpeg模式时：
+```
+dataset_frames/
+└── video_name/
+    ├── video_name_000001.png
+    ├── video_name_000002.png
+    └── ...
 ```
 
-### 视频帧提取使用
+## 依赖要求
 
-```python
-# 1. 导入模块
-from utils.class_frame_extractor import VideoFrameExtractor
+### class_distillation.py
+- torch
+- torch.nn
+- torch.nn.functional
 
-# 2. 创建提取器
-extractor = VideoFrameExtractor("frames_output")
+### class_frame_extractor.py
+- opencv-python (cv2)
+- pathlib
+- subprocess
+- shutil
+- re
+- sympy
 
-# 3. 提取帧
-frames = extractor.extract(
-    "video.mp4",
-    fps=2,
-    start=0,
-    end=30,
-    size=(512, 512)
-)
+## 注意事项
 
-# 4. 处理结果
-print(f"提取了 {len(frames)} 帧")
-```
+1. **知识蒸馏模块**：
+   - 确保教师模型和学生模型的输出维度匹配
+   - 特征蒸馏需要中间层特征，确保特征维度兼容
+   - 温度参数影响蒸馏效果，建议在3-5之间调整
+   - **训练注意事项**：
+     - 教师模型必须设置为`eval()`模式，并冻结参数（`requires_grad=False`）
+     - 教师模型前向传播时使用`torch.no_grad()`避免计算梯度
+     - 建议使用渐进式蒸馏策略，从高温度开始逐渐降低
+     - 监控各项损失的变化，确保蒸馏损失和任务损失的平衡
+     - 对于分割任务，确保输出张量维度为`[B, C, H, W]`格式
+     - 特征蒸馏会增加显存占用，根据GPU内存调整batch_size
 
-## 📝 注意事项
+2. **视频帧提取模块**：
+   - FFmpeg模式需要系统安装FFmpeg
+   - OpenCV模式支持批量处理，适合大视频文件
+   - 输出目录会自动创建
+   - 文件名会自动处理特殊字符
 
-### 知识蒸馏
-1. 确保教师模型已经预训练并冻结参数
-2. 特征层名称需要与模型结构匹配
-3. 及时清理钩子函数避免内存泄漏
-4. 根据任务调整损失权重参数
+## 错误处理
 
-### 视频帧提取
-1. FFmpeg模式需要系统安装FFmpeg
-2. OpenCV模式支持批量处理但速度较慢
-3. 大视频文件建议使用FFmpeg模式
-4. 注意输出目录的磁盘空间
+- 视频文件无法打开时会抛出RuntimeError
+- FFmpeg命令执行失败时会抛出subprocess.CalledProcessError
+- 确保输出目录有写入权限
 
-## 🔧 依赖要求
+## 性能建议
 
-- PyTorch >= 1.7.0
-- OpenCV >= 4.0.0
-- FFmpeg (可选，用于快速提取)
-- NumPy
-- Pathlib
+1. **视频帧提取模块**：
+   - 对于大视频文件，建议使用OpenCV模式并设置合适的batch_size
+   - 根据存储空间和提取速度需求选择合适的图像格式和质量
 
-## 📄 许可证
+2. **知识蒸馏训练**：
+   - **温度策略**：建议先用较高的temperature值（6-8）进行预热，然后逐渐降低到2-4
+   - **损失权重调度**：训练初期更注重任务损失（beta=0.7），后期更注重蒸馏损失（alpha=0.7）
+   - **特征蒸馏优化**：
+     - 特征蒸馏会增加计算开销，可根据需要调整feature_weight（0.05-0.1）
+     - 对于大模型，可以只使用部分中间层进行特征蒸馏
+     - 使用梯度累积来减少显存占用
+   - **训练策略**：
+     - 使用渐进式蒸馏，分阶段调整参数
+     - 监控各项损失的变化趋势，避免蒸馏损失过大导致性能下降
+     - 对于分割任务，建议使用较小的batch_size（8-16）以节省显存
+   - **模型选择**：
+     - 确保学生模型有足够的容量学习教师模型的知识
+     - 教师模型和学生模型的架构差异不宜过大
 
-本工具类遵循项目主许可证。
