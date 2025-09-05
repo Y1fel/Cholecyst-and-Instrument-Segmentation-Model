@@ -8,6 +8,18 @@ from torch.utils.data import Dataset
 from src.common.constants import DATASET_CONFIG
 from src.common.constants import generate_class_mapping, CLASSIFICATION_SCHEMES, WATERSHED_TO_BASE_CLASS
 
+# helper to get valid endoscope ellipse region
+def _ellipse_inside_mask(h, w, margin=2):
+    """返回一个布尔mask：True 表示在椭圆视野内，False 表示黑边区域。
+    margin: 轻微收缩，避免边缘锯齿的误判。
+    """
+    yy, xx = np.ogrid[:h, :w]
+    cy, cx = h / 2.0, w / 2.0
+    # 视野大致是内接椭圆（假设4:3/1:1都能容忍）
+    ry, rx = (h / 2.0 - margin), (w / 2.0 - margin)
+    norm = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2
+    return norm <= 1.0
+
 # 
 class SegDatasetMin(Dataset):
     def __init__(self, data_root: str, dtype: str = "train", img_size: int = 512,
@@ -120,6 +132,7 @@ class SegDatasetMin(Dataset):
     def __len__(self):
        return len(self.pairs)
 
+
     def __getitem__(self, index):
         img_path, mask_path = self.pairs[index]
 
@@ -155,112 +168,200 @@ class SegDatasetMin(Dataset):
             if index < 3:  # 只显示前3个样本的详细信息
                 print(f"[SINGLE_CH] 使用单通道mask: {os.path.basename(mask_path)}")
 
-        if not self.is_binary:
-            # 多类：实现两段式映射，根据 class_id_map 做 ID 映射，未知值 -> ignore_index
-            m = np.full_like(mask, fill_value=self.ignore_index, dtype=np.uint8)
-
-            # 查是否为Watershed mask，进行灰度值→基础语义ID映射
-            if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
-                # 第一段映射：Watershed灰度值 → 基础语义ID
-                from src.common.constants import WATERSHED_TO_BASE_CLASS
-                
-                # 创建基础语义mask
-                base_semantic_mask = np.full_like(mask, 255, dtype=np.uint8)
-                
-                # 应用Watershed映射
-                for watershed_gray, base_id in WATERSHED_TO_BASE_CLASS.items():
-                    base_semantic_mask[mask == watershed_gray] = base_id
-                
-                # 调试输出（前50个batch）
-                # if index < 5:
-                #     watershed_unique = np.unique(mask)
-                #     base_unique = np.unique(base_semantic_mask[base_semantic_mask != 255])
-                #     print(f"[WATERSHED {index}] 灰度值 {watershed_unique} → 基础语义ID {base_unique}")
-                
-                # 使用基础语义mask作为后续映射的输入
-                mask_for_mapping = base_semantic_mask
-            else:
-                # 非Watershed mask直接使用原始mask
-                mask_for_mapping = mask
-
-            # 步骤2：基础语义ID → 训练类ID（第二段映射）
-            # 对于Watershed数据，需要从基础语义ID映射到目标类别
-            if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
-                # Watershed数据：使用基础语义ID进行映射
-                from src.common.constants import CLASSIFICATION_SCHEMES
-                if self.classification_scheme == "direct_mapping":
-                    # 使用3class_org的语义映射
-                    semantic_mapping = CLASSIFICATION_SCHEMES["3class_org"]["mapping"]
-                    default_value = CLASSIFICATION_SCHEMES["3class_org"]["default_for_others"]
-                    
-                    for semantic_id, target_class in semantic_mapping.items():
-                        m[mask_for_mapping == semantic_id] = target_class
-                    
-                    # 处理未映射的语义ID
-                    unique_semantic_ids = np.unique(mask_for_mapping)
-                    for semantic_id in unique_semantic_ids:
-                        if semantic_id != 255 and semantic_id not in semantic_mapping:
-                            m[mask_for_mapping == semantic_id] = default_value
-                            # if index < 3:
-                            #     print(f"[MAPPING {index}] 语义ID {semantic_id} → ignore_index({default_value})")
-                        # elif semantic_id in semantic_mapping:
-                        #     if index < 3:
-                        #         print(f"[MAPPING {index}] 语义ID {semantic_id} → 目标类别{semantic_mapping[semantic_id]}")
-                else:
-                    # 旧的class_id_map方式（应该废弃）
-                    for base_id, train_class in self.class_id_map.items():
-                        m[mask_for_mapping == base_id] = train_class
-            else:
-                # 非Watershed数据：直接使用class_id_map
-                for base_id, train_class in self.class_id_map.items():
-                    m[mask_for_mapping == base_id] = train_class
-
-            # 保持ignore_index不变
-            m[mask == 255] = self.ignore_index
-
-            # 调试输出：类别分布（前5个batch）
-            # if index < 5:
-            #     unique_values = np.unique(m)
-            #     print(f"[MAPPING {index}] 最终训练类别: {unique_values}")
-            #     
-            #     # 计算各类像素占比（排除255）
-            #     valid_mask = m[m != 255]
-            #     if len(valid_mask) > 0:
-            #         unique, counts = np.unique(valid_mask, return_counts=True)
-            #         percentages = counts / len(valid_mask) * 100
-            #         class_dist = {int(cls): f"{pct:.1f}%" for cls, pct in zip(unique, percentages)}
-            #         print(f"[DISTRIBUTION {index}] 类别分布: {class_dist}")
-            #     else:
-            #         print(f"[DISTRIBUTION {index}] 警告：没有有效像素！")
+        # # 检查是否为watershed mask
+        # is_watershed = os.path.basename(mask_path).endswith('_endo_watershed_mask.png')
+        
+        # # 新的简化watershed处理逻辑
+        # if is_watershed:
+        #     # 导入必要的映射
+        #     from src.common.constants import WATERSHED_TO_BASE, BASE_TO_TRAIN_3C
             
-            # 最近邻缩放，保持离散标签不被污染
-            m           = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
-            mask_tensor = torch.from_numpy(m).long()        # [H, W] for cross entropy loss
-            img_tensor  = torch.from_numpy(img).float()     # [3, H, W] for input to model
+        #     # 创建label_map（字符串标签到数字ID的映射）
+        #     label_map = {
+        #         'background': 0, 'instrument': 1, 'target': 2, 'liver': 3, 
+        #         'abdominal_wall': 4, 'ignore': 255
+        #     }
+            
+        #     # 1) 灰度 -> 基础语义字符串
+        #     base_sem = np.full_like(mask, fill_value=255, dtype=np.uint8)
+        #     for g, label in WATERSHED_TO_BASE.items():
+        #         base_sem[mask == g] = label_map[label]  # 例如临时映射到小整数/或先存字符串数组
 
-            return img_tensor, mask_tensor
+        #     # 2) 基础语义 -> 训练类ID (3类/6类)
+        #     train_mask = np.full_like(mask, fill_value=255, dtype=np.uint8)
+        #     for label, cid in BASE_TO_TRAIN_3C.items():
+        #         if cid == 255: continue
+        #         train_mask[(base_sem == label_map[label])] = cid
+
+        #     # 仅真正无效区域保持255；椭圆"内圈背景"强制为0
+        #     # 你的数据是黑色圆外背景：把圆外=255，圆内非语义=0
+        #     if hasattr(self, 'force_ellipse_background_zero') and self.force_ellipse_background_zero:
+        #         # rr, cc = get_valid_ellipse(mask.shape)  # 你已有/可快速实现
+        #         # train_mask[rr, cc] = np.where(train_mask[rr, cc]==255, 0, train_mask[rr, cc])
+        #         pass  # 暂时注释掉，等待get_valid_ellipse函数实现
+
+        #     mask = train_mask
+            
+        #     # 直接处理并返回，跳过后续复杂逻辑
+        #     mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+        #     mask_tensor = torch.from_numpy(mask).long()        # [H, W] for cross entropy loss
+        #     img_tensor  = torch.from_numpy(img).float()       # [3, H, W] for input to model
+        #     return img_tensor, mask_tensor
+
+        # --- replace: unified two-stage mapping ---
+        H, W = mask.shape[:2]
+        inside = _ellipse_inside_mask(H, W)
+
+        # 1) 灰度 → 基础语义 base_id
+        #    对于 watershed：用 constants 里的 WATERSHED_TO_BASE_CLASS
+        #    对于非-watershed：直接把原 mask 当 base_id（兼容已有精确GT或原始mask）
+        from src.common.constants import WATERSHED_TO_BASE_CLASS, CLASSIFICATION_SCHEMES
+
+        filename = os.path.basename(mask_path)
+        is_watershed = filename.endswith("_endo_watershed_mask.png")
+
+        if is_watershed:
+            base = np.full_like(mask, 255, dtype=np.uint8)
+            for g, base_id in WATERSHED_TO_BASE_CLASS.items():
+                base[mask == g] = base_id
         else:
-            # binary
-            # 器械：Class 5 (Grasper) + Class 9 (L-hook) 
-            # 胆囊：Class 10 (Gallbladder)
-            if self.classification_scheme == "binary":
-                # 
-                binary_mapping = CLASSIFICATION_SCHEMES["binary"]["mapping"]
-                fg_mask        = np.zeros_like(mask, dtype=np.uint8)
-                # 
-                for original_id, target_class in binary_mapping.items():
-                    if target_class == 1:  # foreground
-                        fg_mask[mask == original_id] = 1
-                fg = fg_mask
-            else:
-                fg = ((mask == 5) | (mask == 9) | (mask == 10)).astype(np.uint8)
+            # 已是语义 id（精确GT/原始mask）
+            base = mask.copy()
+
+        # 2) 基础语义 base_id → 训练类别 train_id
+        scheme = self.classification_scheme
+        if scheme == "direct_mapping":
+            # 兼容：如果外部直接传了 class_id_map，就用 self.class_id_map
+            base2train = self.class_id_map
+        else:
+            # 用预设方案（3/6/12 类）
+            base2train = CLASSIFICATION_SCHEMES[scheme]["mapping"]
+
+        train = np.full_like(base, self.ignore_index, dtype=np.uint8)
+
+        # 椭圆外一律 ignore（255）
+        train[~inside] = self.ignore_index
+
+        # 椭圆内：已映射到具体类别的像素按映射赋值；未知 base_id → 设为背景 0
+        for b, t in base2train.items():
+            train[(inside) & (base == b)] = t
+
+        # 把仍未命中的“椭圆内像素”安全落地到背景 0（避免全 255 的情况）
+        train[(inside) & (train == self.ignore_index)] = 0
+
+        # 最后缩放 & 转 tensor
+        train = cv2.resize(train, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+        mask_tensor = torch.from_numpy(train).long()
+        img_tensor  = torch.from_numpy(img).float()
+        return img_tensor, mask_tensor
+
+
+        # if not self.is_binary:
+        #     # 多类：实现两段式映射，根据 class_id_map 做 ID 映射，未知值 -> ignore_index
+        #     m = np.full_like(mask, fill_value=self.ignore_index, dtype=np.uint8)
+
+        #     # 查是否为Watershed mask，进行灰度值→基础语义ID映射
+        #     if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
+        #         # 第一段映射：Watershed灰度值 → 基础语义ID
+        #         from src.common.constants import WATERSHED_TO_BASE_CLASS
                 
-            fg = cv2.resize(fg, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+        #         # 创建基础语义mask
+        #         base_semantic_mask = np.full_like(mask, 255, dtype=np.uint8)
+                
+        #         # 应用Watershed映射
+        #         for watershed_gray, base_id in WATERSHED_TO_BASE_CLASS.items():
+        #             base_semantic_mask[mask == watershed_gray] = base_id
+                
+        #         # 调试输出（前50个batch）
+        #         # if index < 5:
+        #         #     watershed_unique = np.unique(mask)
+        #         #     base_unique = np.unique(base_semantic_mask[base_semantic_mask != 255])
+        #         #     print(f"[WATERSHED {index}] 灰度值 {watershed_unique} → 基础语义ID {base_unique}")
+                
+        #         # 使用基础语义mask作为后续映射的输入
+        #         mask_for_mapping = base_semantic_mask
+        #     else:
+        #         # 非Watershed mask直接使用原始mask
+        #         mask_for_mapping = mask
 
-            mask_tensor = torch.from_numpy(fg)[None, ...].float()
-            img_tensor  = torch.from_numpy(img)
+        #     # 步骤2：基础语义ID → 训练类ID（第二段映射）
+        #     # 对于Watershed数据，需要从基础语义ID映射到目标类别
+        #     if os.path.basename(mask_path).endswith('_endo_watershed_mask.png'):
+        #         # Watershed数据：使用基础语义ID进行映射
+        #         from src.common.constants import CLASSIFICATION_SCHEMES
+        #         if self.classification_scheme == "direct_mapping":
+        #             # 使用3class_org的语义映射
+        #             semantic_mapping = CLASSIFICATION_SCHEMES["3class_org"]["mapping"]
+        #             default_value = CLASSIFICATION_SCHEMES["3class_org"]["default_for_others"]
+                    
+        #             for semantic_id, target_class in semantic_mapping.items():
+        #                 m[mask_for_mapping == semantic_id] = target_class
+                    
+        #             # 处理未映射的语义ID
+        #             unique_semantic_ids = np.unique(mask_for_mapping)
+        #             for semantic_id in unique_semantic_ids:
+        #                 if semantic_id != 255 and semantic_id not in semantic_mapping:
+        #                     m[mask_for_mapping == semantic_id] = default_value
+        #                     # if index < 3:
+        #                     #     print(f"[MAPPING {index}] 语义ID {semantic_id} → ignore_index({default_value})")
+        #                 # elif semantic_id in semantic_mapping:
+        #                 #     if index < 3:
+        #                 #         print(f"[MAPPING {index}] 语义ID {semantic_id} → 目标类别{semantic_mapping[semantic_id]}")
+        #         else:
+        #             # 旧的class_id_map方式（应该废弃）
+        #             for base_id, train_class in self.class_id_map.items():
+        #                 m[mask_for_mapping == base_id] = train_class
+        #     else:
+        #         # 非Watershed数据：直接使用class_id_map
+        #         for base_id, train_class in self.class_id_map.items():
+        #             m[mask_for_mapping == base_id] = train_class
 
-            return img_tensor, mask_tensor
+        #     # 保持ignore_index不变
+        #     m[mask == 255] = self.ignore_index
+
+        #     # 调试输出：类别分布（前5个batch）
+        #     # if index < 5:
+        #     #     unique_values = np.unique(m)
+        #     #     print(f"[MAPPING {index}] 最终训练类别: {unique_values}")
+        #     #     
+        #     #     # 计算各类像素占比（排除255）
+        #     #     valid_mask = m[m != 255]
+        #     #     if len(valid_mask) > 0:
+        #     #         unique, counts = np.unique(valid_mask, return_counts=True)
+        #     #         percentages = counts / len(valid_mask) * 100
+        #     #         class_dist = {int(cls): f"{pct:.1f}%" for cls, pct in zip(unique, percentages)}
+        #     #         print(f"[DISTRIBUTION {index}] 类别分布: {class_dist}")
+        #     #     else:
+        #     #         print(f"[DISTRIBUTION {index}] 警告：没有有效像素！")
+            
+        #     # 最近邻缩放，保持离散标签不被污染
+        #     m           = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+        #     mask_tensor = torch.from_numpy(m).long()        # [H, W] for cross entropy loss
+        #     img_tensor  = torch.from_numpy(img).float()     # [3, H, W] for input to model
+
+        #     return img_tensor, mask_tensor
+        # else:
+        #     # binary
+        #     # 器械：Class 5 (Grasper) + Class 9 (L-hook) 
+        #     # 胆囊：Class 10 (Gallbladder)
+        #     if self.classification_scheme == "binary":
+        #         # 
+        #         binary_mapping = CLASSIFICATION_SCHEMES["binary"]["mapping"]
+        #         fg_mask        = np.zeros_like(mask, dtype=np.uint8)
+        #         # 
+        #         for original_id, target_class in binary_mapping.items():
+        #             if target_class == 1:  # foreground
+        #                 fg_mask[mask == original_id] = 1
+        #         fg = fg_mask
+        #     else:
+        #         fg = ((mask == 5) | (mask == 9) | (mask == 10)).astype(np.uint8)
+                
+        #     fg = cv2.resize(fg, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+
+        #     mask_tensor = torch.from_numpy(fg)[None, ...].float()
+        #     img_tensor  = torch.from_numpy(img)
+
+        #     return img_tensor, mask_tensor
 
     def _get_multiclass_mask_candidates(self, stem):
         """多分类任务的mask候选列表（watershed优先）"""
@@ -308,3 +409,4 @@ class SegDatasetMin(Dataset):
             print(f"Foreground ratio range: {np.min(foreground_ratios):.3f} - {np.max(foreground_ratios):.3f}")
 
             return foreground_ratios
+    

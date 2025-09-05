@@ -1,0 +1,59 @@
+# Teacher训练改进配置文件
+# 针对过度预测问题的优化版本
+
+# === 基础训练配置 ===
+epochs: 6
+batch_size: 6           
+lr: 0.0005              # 适中学习率
+img_size:            # 提高分辨率以获得更精细的分割
+num_workers: 0          
+num_classes: 3          
+
+# === 数据配置 ===
+split: "train"
+binary: false           
+val_ratio: 0.25         # 增加验证集比例
+monitor_interval: 5     
+
+# === 关键：使用相同的分类方案 ===
+classification_scheme: "3class_org"    
+
+# === 标准训练模式（非蒸馏） ===
+enable_distillation: false
+model: "unet_plus_plus"
+
+# === 训练策略 ===
+stage: "offline"
+
+# === 优化器配置 ===
+optimizer: "adamw"
+sgd_momentum: 0.9       # SGD优化器动量（当使用SGD时）
+weight_decay: 0.001     # 增加正则化
+scheduler: "cosine"
+
+# === 数据增强（增强版） ===
+augment: true
+flip_prob: 0.6
+rotation_degree: 25
+
+# === 监控和可视化 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 12         # 增加可视化样本
+
+# === 保存策略 ===
+save_interval: 2        # 更频繁保存
+val_interval: 1
+save_best_only: true
+
+# === 调试配置 ===
+debug: false
+early_stopping: true
+patience: 10
+
+# === 备注 ===
+# 主要改进：
+# 1. 更高分辨率训练（384x384）
+# 2. 增加训练轮数和验证集比例
+# 3. 更强的正则化和数据增强
+# 4. 更频繁的模型保存和监控

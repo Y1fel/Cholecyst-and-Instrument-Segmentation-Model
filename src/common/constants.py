@@ -72,20 +72,45 @@ REGION_SEPARATION_COLORS = {
 # Watershed灰度值 → 基础语义ID (0..12) 映射表
 # 这是解决标签对齐问题的关键映射
 WATERSHED_TO_BASE_CLASS = {
-    50: 0,   # 背景 (watershed中的灰度值50对应背景)
-    11: 1,   # Abdominal Wall  
-    21: 2,   # Liver
-    13: 3,   # GI Tract
-    12: 4,   # Fat
-    31: 5,   # Instrument: Grasper
-    23: 6,   # Connective Tissue (预留)
-    24: 7,   # Blood (预留)
-    25: 8,   # Cystic Duct (预留)
-    32: 9,   # Instrument: L-hook
-    22: 10,  # Gallbladder
-    33: 11,  # Hepatic Vein (预留)
-    5:  12,  # Liver Ligament (预留)
-    255: 255 # ignore index保持不变
+    # 50: 0,   # 背景 (watershed中的灰度值50对应背景)
+    # 11: 1,   # Abdominal Wall  
+    # 21: 2,   # Liver
+    # 13: 3,   # GI Tract
+    # 12: 4,   # Fat
+    # 31: 5,   # Instrument: Grasper
+    # 23: 6,   # Connective Tissue (预留)
+    # 24: 7,   # Blood (预留)
+    # 25: 8,   # Cystic Duct (预留)
+    # 32: 9,   # Instrument: L-hook
+    # 22: 10,  # Gallbladder
+    # 33: 11,  # Hepatic Vein (预留)
+    # 5:  12,  # Liver Ligament (预留)
+    # 255: 255 # ignore index保持不变
+
+    # 黑边/圆外:
+    0: 255,   # 外圈黑色 → ignore
+    255: 255, # 约定的 ignore
+
+    # 典型内圈背景（多种深灰）：统一映射为基础“背景” 0
+    10: 0, 11: 0, 12: 0, 13: 0, 20: 0, 21: 0, 22: 0, 31: 0, 32: 0, 50: 0,
+    # …把你在样例里看到的所有“内圈背景灰度”都并入 0
+
+    # 显式语义（例）：按你们的定义把有语义的灰度挂到 base_id
+    # base_id 约定：0=背景, 1=器械, 2=胆囊/目标, 3=肝脏, 4=腹壁, …可扩展
+    100: 1, 101: 1,    # 工具杆/钳头
+    200: 2, 201: 2,    # 目标器官（胆囊）
+    210: 3, 211: 3,    # 肝脏
+    180: 4,            # 腹壁/脂肪
+}
+
+WATERSHED_TO_BASE = {   # 依据 seg8k 版式，按你的统计完善
+  11: 'background', 12: 'instrument', 13: 'instrument',
+  21: 'target',     22: 'target',      31: 'liver',
+  50: 'abdominal_wall', 255: 'ignore'
+}
+BASE_TO_TRAIN_3C = {      # 3类任务映射
+  'background': 0, 'liver': 0, 'abdominal_wall': 0,
+  'instrument': 1, 'target': 2, 'ignore': 255
 }
 
 # 基础13类定义（对应Kaggle数据集）

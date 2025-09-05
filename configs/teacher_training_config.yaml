@@ -2,10 +2,10 @@
 # 使用UNet++作为Teacher模型的标准训练
 
 # === 基础训练配置 ===
-epochs: 12              # 测试用快速训练
-batch_size: 4           
-lr: 0.0001              
-img_size: 256           
+epochs: 25              # 增加训练轮数以提高精度
+batch_size: 6           # 稍微增加batch size
+lr: 0.0003              # 提高学习率加快收敛
+img_size: 384           # 提高分辨率以获得更精细的分割
 num_workers: 0          
 num_classes: 3          
 
@@ -33,7 +33,8 @@ scheduler: "cosine"
 # === 数据增强 ===
 augment: true
 flip_prob: 0.5
-rotation_degree: 10
+rotation_degree: 20     # 增加旋转角度
+# 添加更多数据增强选项
 
 # === 监控和可视化 ===
 enable_gpu_monitor: true
@@ -41,11 +42,11 @@ save_viz: true
 viz_samples: 6
 
 # === 保存策略 ===
-save_interval: 5
+save_interval: 3        # 更频繁保存以监控训练进度
 val_interval: 1
 save_best_only: true
 
 # === 调试配置 ===
 debug: false
 early_stopping: true
-patience: 5
+patience: 8             # 增加patience以避免过早停止

@@ -88,7 +88,7 @@ def parse_args():
     
     # 模型插拔
     p.add_argument("--model", type=str, default="unet_min",
-                   choices=["unet_min", "mobile_unet", "adaptive_unet"])
+                   choices=["unet_min", "unet_plus_plus", "deeplabv3_plus", "hrnet", "mobile_unet", "adaptive_unet"])
     
     # 兼容 OutputManager 的模型类型标记（用于run目录命名）
     p.add_argument("--model_type", type=str, default=None,
@@ -142,6 +142,14 @@ def parse_args():
     p.add_argument("--early_stopping", action='store_true', help="Enable early stopping")
     p.add_argument("--patience", type=int, default=5, help="Patience for early stopping")
 
+    p.add_argument("--mode", choices=["standard", "kd"], default="standard",
+                    help="standard: 仅GT训练Teacher；kd: Teacher+Student知识蒸馏")
+    p.add_argument("--teacher_ckpt", type=str, default="",
+                    help="KD模式下Teacher的权重路径")
+    p.add_argument("--temperature", type=float, default=4.0)
+    p.add_argument("--alpha", type=float, default=0.7,
+                    help="总损失: alpha*CE + (1-alpha)*KD")
+
     return p.parse_args()
 
 # validate arguments
@@ -178,6 +186,10 @@ def validate_args(args):
     # Early stopping parameter validation
     if args.early_stopping and args.patience <= 0:
         errors.append("patience must be positive when early_stopping is enabled")
+
+    # Knowledge distillation parameter validation
+    if args.enable_distillation and not args.teacher_checkpoint:
+        errors.append("KD模式必须提供 --teacher_checkpoint，禁止使用随机Teacher。")
     
     # Output validation results
     if warnings:
@@ -239,6 +251,8 @@ def get_parser_default(param_name):
         'save_interval': 1,         # Save checkpoint every x epochs
         'flip_prob': 0.5,
         'rotation_degree': 15,
+        # 添加模型相关默认值
+        'model': 'unet_min',
         # 添加蒸馏相关默认值
         'enable_distillation': False,
         'teacher_model': 'unet_plus_plus',
@@ -400,6 +414,10 @@ def train_one_epoch(
             
             student_logits = model(images)
 
+            # KD 通道对齐断言：防止 Teacher/Student 通道不一致导致蒸馏错误
+            assert teacher_logits.shape[1] == student_logits.shape[1] == args.num_classes, \
+                f"Teacher/Student/num_classes不一致: Teacher={teacher_logits.shape} vs Student={student_logits.shape} vs num_classes={args.num_classes}"
+
             # 使用蒸馏损失
             loss_dict = criterion(student_logits, teacher_logits, masks)
             loss = loss_dict['total_loss']
@@ -495,6 +513,12 @@ def main():
     args = merge_config_with_args(args, config)
     validate_args(args)
 
+    # Binary/Multiclass 强一致性保护：自动修正 num_classes
+    if args.binary:
+        if args.num_classes != 2:
+            print(f"⚠️ binary=True 但 num_classes={args.num_classes} != 2，自动将 num_classes 置为 2")
+            args.num_classes = 2
+
     # Print save strategy description
     print(f"SAVE STRATEGY:")
     print(f"   - Best model: Save when validation improves")
@@ -554,6 +578,50 @@ def main():
         args.data_root, dtype=args.split, img_size=args.img_size,
         **dataset_config
     )
+
+    # 用数据集真实类数回写 args.num_classes
+    # 防止CE/BCE通道数与实际映射不一致导致的全255/全背景/颜色错乱问题
+    if not args.binary:
+        original_num_classes = args.num_classes
+        args.num_classes = getattr(full_dataset, "num_classes", args.num_classes)
+        if args.num_classes != original_num_classes:
+            print(f"[DATASET] Updated num_classes: {original_num_classes} -> {args.num_classes} (from dataset)")
+        else:
+            print(f"[DATASET] Confirmed num_classes: {args.num_classes} (matches dataset)")
+
+    # 标签健康检查：快速检测是否所有标签都被映射为255（ignore）
+    print("[HEALTH CHECK] Checking label distribution in first 20 samples...")
+    from collections import Counter
+    valid_counter = Counter()
+    sample_size = min(20, len(full_dataset))
+    
+    for i in range(sample_size):
+        try:
+            _, mask = full_dataset[i]  # 假设 __getitem__ 返回 image, mask
+            unique_values = torch.unique(mask)
+            valid_values = unique_values[unique_values != 255]  # 排除ignore标签
+            valid_counter.update(valid_values.cpu().tolist())
+        except Exception as e:
+            print(f"[HEALTH CHECK] Warning: Failed to check sample {i}: {e}")
+            continue
+    
+    if len(valid_counter) == 0:
+        raise ValueError(
+            "❌ 所有样本的标签都只有 255（ignore），请检查 class_id_map / 映射流程。\n"
+            "可能原因：\n"
+            "  1. class_id_map 映射错误，所有原始标签都被映射为255\n"
+            "  2. 数据集路径错误或标签文件损坏\n"
+            "  3. 映射函数逻辑错误，未正确处理目标类别"
+        )
+    else:
+        valid_classes = sorted(valid_counter.keys())
+        total_valid_pixels = sum(valid_counter.values())
+        print(f"✅ [HEALTH CHECK] 发现有效标签: {valid_classes}")
+        print(f"✅ [HEALTH CHECK] 标签分布: {dict(valid_counter)} (共 {total_valid_pixels:,} 个有效像素)")
+        
+        # 额外检查：确保有效类别数与预期匹配
+        if not args.binary and len(valid_classes) > args.num_classes:
+            print(f"⚠️ [HEALTH CHECK] Warning: 发现 {len(valid_classes)} 个有效类别，但 num_classes={args.num_classes}")
 
     # split ratio
     val_ratio  = args.val_ratio
@@ -696,7 +764,16 @@ def main():
         else:
             # 多分类：模型输出num_classes个通道，用于CrossEntropyLoss  
             model = build_model(args.model, num_classes=args.num_classes, in_ch=3, stage=args.stage).to(device)
-            criterion = nn.CrossEntropyLoss(ignore_index=255)   # 多分类用CE
+            
+            # 计算类别权重以处理类别不平衡
+            print("Computing class weights to handle class imbalance...")
+            class_weights = compute_class_weights(full_dataset, args.num_classes, ignore_index=255)
+            class_weights = class_weights.to(device)
+            print(f"Class weights: {class_weights}")
+            
+            # 使用加权CrossEntropyLoss来处理类别不平衡（推荐方案）
+            criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+            # criterion = FocalLoss(alpha=1.0, gamma=2.0, ignore_index=255)  # 备选：Focal Loss
         teacher_model = None  # 标准模式下没有Teacher模型
 
     # Optimizer and Scheduler
