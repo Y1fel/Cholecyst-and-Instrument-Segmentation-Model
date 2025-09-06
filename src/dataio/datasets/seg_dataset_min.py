@@ -22,13 +22,17 @@ def _ellipse_inside_mask(h, w, margin=2):
 
 # 
 class SegDatasetMin(Dataset):
-    def __init__(self, data_root: str, dtype: str = "train", img_size: int = 512,
+    def __init__(self,
+            data_root: str,
+            dtype: str = "train",
+            img_size: int = 512,
             return_multiclass: bool    = False,
             class_id_map: dict | None  = None,
             ignore_index: int          = 255,
-            classification_scheme: str = None, # abonded
-            custom_mapping: dict       = None, # abonded
-            target_classes: list       = None, # abonded
+            frame_paths: list          = None,
+            classification_scheme: str = None, # abandoned
+            custom_mapping: dict       = None, # abandoned
+            target_classes: list       = None, # abandoned
         ):
 
         self.data_root = os.path.abspath(data_root)
@@ -43,7 +47,7 @@ class SegDatasetMin(Dataset):
         if class_id_map is not None:
              # 1) 直接用传进来的“最终映射”（已经是 WS→TRAIN 的 0/1/2/255）
             self.class_id_map = class_id_map
-            self.ws2train = class_id_map  # ✅ 关键：不要再调用 compose_mapping 二次计算
+            self.ws2train = class_id_map  #关键：不要再调用 compose_mapping 二次计算
 
             # 2) 正确计算 num_classes（忽略 255）
             valid_vals = {v for v in class_id_map.values() if v != self.ignore_index}

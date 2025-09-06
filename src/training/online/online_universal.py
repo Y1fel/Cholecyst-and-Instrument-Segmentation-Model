@@ -4,13 +4,9 @@
 基于adaptive_unet_main.py和train_offline_universal.py改进
 移除模型保存功能，改为定期可视化
 """
-
 import argparse
-import os
 import random
-import sys
 from collections import deque
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -34,6 +30,8 @@ from src.common.pseudo_label_quality import quality_filter
 from src.models.model_zoo import build_model
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
 
+#导入工具类
+from utils.class_frame_extractor import VideoFrameExtractor
 
 # 帧选择器（从adaptive_unet_main.py移植）
 class FrameSelector:
@@ -132,7 +130,8 @@ def parse_args():
 
     # 基础训练参数
     p.add_argument("--cfg", type=str, default=None, help="Optional YAML config")
-    p.add_argument("--data_root", type=str, required=True, help="Dataset root path")
+    #p.add_argument("--data_root", type=str, required=True, help="Dataset root path")
+    p.add_argument("--video_root", type=str, default=None, help="Video root path")
 
     # 数据参数
     p.add_argument("--split", type=str, default="train")
@@ -218,10 +217,15 @@ class OnlineLearner:
             self.criterion = nn.CrossEntropyLoss()
 
         # 只优化适配器参数（对于自适应模型）
-        adapter_params = []
-        for name, param in self.model.named_parameters():
-            if 'adapter' in name or not args.use_frame_selector:
-                adapter_params.append(param)
+        # adapter_params = []
+        # for name, param in self.model.named_parameters():
+        #     if 'adapter' in name or not args.use_frame_selector:
+        #         adapter_params.append(param)
+        # 处理adapter_params为空的情况
+        adapter_params = [p for n, p in self.model.named_parameters() if 'adapter' in n]
+        if len(adapter_params) == 0:
+            print("Warning: no adapter params found — using all trainable params")
+            adapter_params = [p for p in self.model.parameters() if p.requires_grad]
 
         self.optimizer = torch.optim.Adam(adapter_params, lr=args.lr)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -332,6 +336,7 @@ class OnlineLearner:
 
         # 在线学习循环
         for step, (images, _) in enumerate(train_loader):
+            if step >= self.args.online_steps: break;
             images = images.to(self.device)
             # ==== 伪标签生成与训练 ====
             if self.offline_model is not None:
@@ -432,8 +437,8 @@ class OnlineLearner:
                 max_samples=self.args.viz_samples, device=self.device
             )
 
-        return self.loss_history, self.metrics_history
-
+        self.last_results = (self.loss_history, self.metrics_history)
+        return self.last_results
 
 def main():
     args = parse_args()
@@ -447,26 +452,6 @@ def main():
     output_mgr = OutputManager(model_type=model_tag, run_type="online")
     output_mgr.save_config(vars(args))
 
-    # 加载数据集
-    # 注意：在线学习通常使用流式数据，这里使用数据集作为示例
-    dataset = SegDatasetMin(args.data_root, dtype=args.split, img_size=args.img_size)
-    data_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-
-    # 创建验证集用于评估和可视化
-    val_dataset = SegDatasetMin(args.data_root, dtype="val", img_size=args.img_size)
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers
-    )
-
     # 创建模型
     num_classes = 1 if args.binary else args.num_classes
     model = build_model(args.model, num_classes=num_classes, in_ch=3)
@@ -478,10 +463,47 @@ def main():
         offline_model_name=args.offline_model_name,
         offline_num_classes=args.offline_num_classes
     )
+    def train_fn(batch_frames):
+        """
+        每当切好一批帧就触发，用 learner 进行在线训练。
+        batch_frames: [str] (帧目录路径列表)
+        """
+        # 创建数据集
+        dataset = SegDatasetMin(batch_frames, dtype=args.split, img_size=args.img_size)
+        data_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True
+        )
 
-    # 运行在线学习
-    loss_history, metrics_history = learner.run_online_learning(data_loader, val_loader)
+        # 创建验证集用于评估和可视化
+        val_dataset = SegDatasetMin(batch_frames, dtype="val", img_size=args.img_size)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers
+        )
 
+        # 在线学习入口
+        learner.run_online_learning(data_loader, val_loader)
+
+    # 启动切帧（异步+并行训练）
+    extractor = VideoFrameExtractor(output_dir="") # 自定义输出路径
+    extractor.extract(
+        video_path=args.video_root,
+        fps=2,
+        start=10,
+        end=60,
+        size=(args.img_size, args.img_size),
+        fmt="png",
+        batch_size=5,
+        mode=2,
+        train_fn=train_fn  # 绑定训练回调
+    )
+    loss_history, metrics_history = learner.last_results
     # 打印总结
     summary = output_mgr.get_run_summary()
     final_metrics = metrics_history[-1] if metrics_history else {}
@@ -493,3 +515,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
