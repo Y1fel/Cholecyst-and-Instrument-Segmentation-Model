@@ -2,10 +2,10 @@
 # 针对过度预测问题的优化版本
 
 # === 基础训练配置 ===
-epochs: 6
+epochs: 3
 batch_size: 6           
 lr: 0.0005              # 适中学习率
-img_size:            # 提高分辨率以获得更精细的分割
+img_size: 384           # 提高分辨率以获得更精细的分割
 num_workers: 0          
 num_classes: 3          
 

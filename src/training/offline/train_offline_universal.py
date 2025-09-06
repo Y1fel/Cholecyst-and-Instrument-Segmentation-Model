@@ -593,14 +593,23 @@ def main():
     print("[HEALTH CHECK] Checking label distribution in first 20 samples...")
     from collections import Counter
     valid_counter = Counter()
-    sample_size = min(20, len(full_dataset))
+    sample_size = min(200, len(full_dataset))
     
     for i in range(sample_size):
         try:
             _, mask = full_dataset[i]  # 假设 __getitem__ 返回 image, mask
-            unique_values = torch.unique(mask)
+            mask_tensor = mask if torch.is_tensor(mask) else torch.tensor(mask)
+            unique_values = torch.unique(mask_tensor)
             valid_values = unique_values[unique_values != 255]  # 排除ignore标签
             valid_counter.update(valid_values.cpu().tolist())
+            
+            lab = mask_tensor.numpy()
+            valid = lab[lab != 255]
+            if valid.size == 0:
+                print(f"[HEALTH CHECK] sample#{i}: only ignore")
+            else:
+                u, c = np.unique(valid, return_counts=True)
+                print(f"[HEALTH CHECK] sample#{i}: {dict(zip(u.tolist(), c.tolist()))}")
         except Exception as e:
             print(f"[HEALTH CHECK] Warning: Failed to check sample {i}: {e}")
             continue
