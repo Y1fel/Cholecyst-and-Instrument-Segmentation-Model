@@ -24,7 +24,8 @@ from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 from src.common.train_monitor import TrainMonitor
-from src.common.pseudo_label_quality import quality_filter
+from src.common.pseudo_label_quality import quality_filter, denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
+from src.common.ema_safety import EMASafetyManager
 
 # 模型导入
 from src.models.model_zoo import build_model
@@ -245,6 +246,9 @@ class OnlineLearner:
             self.offline_model = load_offline_model(
                 offline_model_path, offline_model_name, offline_num_classes, device)
 
+        # 初始化EMA安全管理器
+        self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0, cooldown_period=5)
+
     def process_single_frame(self, x):
         """处理单帧的辅助函数"""
         return self.model(x.unsqueeze(0)).squeeze(0)
@@ -359,27 +363,51 @@ class OnlineLearner:
                 with torch.no_grad():
                     logits = self.offline_model(selected_imgs)
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
-                    pseudo_labels = torch.argmax(probs, axis=1)
-                    # 伪标签质控
-                    mask = quality_filter(probs, pseudo_labels)
+                    pseudo_labels = np.argmax(probs, axis=1)
+                    pseudo_labels = denoise_pseudo_label(
+                        pseudo_labels[np.newaxis, ...] if pseudo_labels.ndim==2 else pseudo_labels,
+                        min_area=100, morph_op='open', morph_structure=np.ones((3,3))
+                    )
+                    if pseudo_labels.shape[0] == 1:
+                        pseudo_labels = pseudo_labels[0]
+                    pixel_masks = pixel_gate_mask(probs, pseudo_labels)
+                    mask = mask_quality_filter_with_pixel_mask(probs, pseudo_labels, pixel_masks)
                     if not np.any(mask):
                         print(f"Step {step}: No pseudo labels passed quality control, skipping batch.")
                         continue
-                    pseudo_labels = torch.from_numpy(pseudo_labels[mask]).to(self.device)
+                    pseudo_labels = pseudo_labels[mask]
+                    probs = probs[mask]
                     selected_imgs = selected_imgs[mask]
+                    pixel_masks = pixel_masks[mask]
                 # 用伪标签训练online模型
                 self.model.train()
                 self.optimizer.zero_grad()
                 outputs = self.model(selected_imgs)
+                def masked_loss(outputs, targets, pixel_mask, criterion, is_binary):
+                    if outputs.ndim == 4:
+                        if is_binary:
+                            outputs = outputs.squeeze(1)
+                        else:
+                            outputs = outputs.permute(0,2,3,1)
+                    outputs = outputs[pixel_mask]
+                    targets = targets[pixel_mask]
+                    if not is_binary and outputs.ndim == 2:
+                        outputs = outputs
+                    return criterion(outputs, targets)
                 if self.args.binary:
-                    loss = self.criterion(outputs, pseudo_labels.float())
+                    loss = masked_loss(outputs, torch.from_numpy(pseudo_labels).float().to(self.device), pixel_masks, self.criterion, True)
                 else:
-                    loss = self.criterion(outputs, pseudo_labels)
+                    loss = masked_loss(outputs, torch.from_numpy(pseudo_labels).to(self.device), pixel_masks, self.criterion, False)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
+                # === EMA安全管理 ===
+                skip_update = self.ema_safety.step(loss.item(), self.model)
+                if skip_update:
+                    print(f"[Step {step}] EMA/异常/冷却机制触发，跳过参数更新。")
+                else:
+                    self.optimizer.step()
                 self.loss_history.append(loss.item())
-                frame_stats = {'all_frames': 0, 'single_frame': 0} # 伪标签流程不统计帧选择
+                frame_stats = {'all_frames': 0, 'single_frame': 0}
             else:
                 loss = None
                 frame_stats = None
@@ -515,4 +543,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
