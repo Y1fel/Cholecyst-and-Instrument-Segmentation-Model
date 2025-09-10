@@ -1,26 +1,10 @@
-#from scripts.class_frame_extractor import VideoFrameExtractor 导入
-#extractor = VideoFrameExtractor(output_dir="dataset_frames") 定义路径
-#frames = extractor.extract(
-#    "D:\MachineLearning\Cholecyst-and-Instrument-Segmentation-Model\scripts\GmUqWJFFlx08qWpUnRTO01041201Zi810E010.mp4",
-#    fps=2,            每秒取 2 帧
-#    start=10,         从第 10 秒开始
-#    end=60,           到第 60 秒结束
-#    size=(512, 512),  输出统一大小
-#    fmt="jpg",        图像格式
-#    jpg_quality=90,   图像质量
-#    batch_size=30,    包大小
-#    mode=2，          选择模式，mode=1为ffmpeg mode=2为opencv 只有opencv可以分包
-#)
-# print(f"共提取 {len(frames)} 帧，前 5 张：", frames[:5]) 输出
-
 import re
 import cv2
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
-
-from sympy import false
+from typing import Optional, Tuple, Callable
+import threading, queue
 
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".mpg", ".mpeg"}
 SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]+")
@@ -47,21 +31,27 @@ class VideoFrameExtractor:
         jpg_quality: int = 95,
         batch_size: int = 30,
         mode: int = 2,
+        train_fn: Optional[Callable[[list[str]], None]] = None,  # 新增消费者回调函数
     ) -> list[str]:
+        """
+        train_fn: 一个函数, 负责消费 batch, 例如训练模型:
+            def train_fn(batch_frames: list[str]): ...
+        """
 
         video = Path(video_path)
         out_dir = self.output_dir / safe_stem(video)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if mode == 2 or self.use_ffmpeg == False:
-            return self._extract_opencv(video, out_dir, fps, every_n, start, end, size, fmt, jpg_quality, batch_size)
+            return self._extract_opencv(
+                video, out_dir, fps, every_n, start, end, size,
+                fmt, jpg_quality, batch_size, train_fn
+            )
         else:
-            return self._extract_ffmpeg(video, out_dir, fps, every_n, start, end, size, fmt, jpg_quality)
-
-        #if self.use_ffmpeg:
-        #    return self._extract_ffmpeg(video, out_dir, fps, every_n, start, end, size, fmt, jpg_quality)
-        #else:
-        #    return self._extract_opencv(video, out_dir, fps, every_n, start, end, size, fmt, jpg_quality, batch_size)
+            return self._extract_ffmpeg(
+                video, out_dir, fps, every_n, start, end, size,
+                fmt, jpg_quality
+            )
 
     def _extract_ffmpeg(
         self, video: Path, out_dir: Path,
@@ -91,15 +81,16 @@ class VideoFrameExtractor:
         if vf:
             cmd += ["-vf", ",".join(vf)]
         if fmt.lower() in ("jpg", "jpeg"):
-            cmd += ["-q:v", str(max(2, min(31, 31 - round((jpg_quality/100)*29))))]  # 转换 JPEG 质量
+            cmd += ["-q:v", str(max(2, min(31, 31 - round((jpg_quality / 100) * 29))))]  # JPEG质量控制
         cmd += [pattern]
 
         subprocess.run(cmd, check=True)
         return [str(p) for p in sorted(out_dir.glob(f"*.{fmt}"))]
 
     def _extract_opencv(
-        self, video: Path, out_dir: Path,
-        fps, every_n, start, end, size, fmt, jpg_quality, batch_size
+            self, video: Path, out_dir: Path,
+            fps, every_n, start, end, size, fmt, jpg_quality, batch_size,
+            train_fn: Optional[Callable[[str], None]] = None  # 回调参数现在是目录路径
     ) -> list[str]:
         cap = cv2.VideoCapture(str(video))
         if not cap.isOpened():
@@ -124,7 +115,25 @@ class VideoFrameExtractor:
         batch_idx = 1
         batch_dir = out_dir / f"batch_{batch_idx}"
         batch_dir.mkdir(parents=True, exist_ok=True)
+        batch_frames = []
 
+        # 消费者线程
+        q = queue.Queue()
+
+        def consumer():
+            while True:
+                batch_dir_path = q.get()
+                if batch_dir_path is None:
+                    q.task_done()
+                    break
+                if train_fn:
+                    train_fn(batch_dir_path)  # 🔥 回调传目录路径
+                q.task_done()
+
+        t = threading.Thread(target=consumer, daemon=True)
+        t.start()
+
+        # 生产者
         while True:
             pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             if pos >= end_frame:
@@ -140,8 +149,11 @@ class VideoFrameExtractor:
                 if w > 0 and h > 0:
                     frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
-            # 👇 控制 batch 文件夹
             if batch_size and idx_out > 0 and idx_out % batch_size == 0:
+                # 当前 batch 满，放入队列，只传目录
+                q.put(str(batch_dir))
+                batch_frames.clear()
+
                 batch_idx += 1
                 batch_dir = out_dir / f"batch_{batch_idx}"
                 batch_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +165,17 @@ class VideoFrameExtractor:
                 cv2.imwrite(str(out_path), frame)
 
             frame_paths.append(str(out_path))
+            batch_frames.append(str(out_path))
             idx_out += 1
 
         cap.release()
+
+        # 最后一个 batch
+        if batch_frames:
+            q.put(str(batch_dir))  # 🔥 回调最后一个 batch 目录
+
+        q.put(None)  # 结束信号
+        q.join()  # 等待消费者线程处理完
+
         return frame_paths
+

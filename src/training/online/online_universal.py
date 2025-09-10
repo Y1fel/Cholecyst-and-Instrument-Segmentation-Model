@@ -1,138 +1,65 @@
 # src/training/online/online_universal.py
 """
 通用在线学习模板 - 集成监控、可视化、评估功能
-基于adaptive_unet_main.py和train_offline_universal.py改进
-移除模型保存功能，改为定期可视化
+改动：支持加载已有 student checkpoint，student 先预测输出（线上结果），
+      使用 teacher (offline model) 生成伪标签并在线更新 student。
+修复/增强：
+ - 确保 teacher 的 no_grad 作用域不会影响 student 训练 forward
+ - 在每个 batch 保存 student 的预测（包括将被用于训练的帧），并在训练前保存
+ - 限制每次在线训练使用的伪标签数量，避免 OOM；支持可选 AMP 混合精度
+ - 在 teacher 推理后尽快释放显存
+ - 使用 global_step 避免覆盖可视化；实时保存 best student model
 """
-
+import glob
+import cv2
 import argparse
-import os
 import random
-import sys
 from collections import deque
-
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import os
+import matplotlib.pyplot as plt
 
 # 路径修正，确保src包可import
-import sys, os
+import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
 src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
 # 导入通用模块
+from pathlib import Path
+from utils.class_frame_to_video import VideoFrameMerger
 from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 from src.common.train_monitor import TrainMonitor
-from src.common.pseudo_label_quality import quality_filter
+from src.common.pseudo_label_quality import quality_filter, denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
 
 # 模型导入
 from src.models.model_zoo import build_model
 from src.dataio.datasets.seg_dataset_min import SegDatasetMin
 
+# 导入工具类
+from utils.class_frame_extractor import VideoFrameExtractor
 
-# 帧选择器（从adaptive_unet_main.py移植）
-class FrameSelector:
-    """帧选择器，根据帧间相似度决定处理策略"""
-
-    def __init__(self, threshold=0.9, adaptive=True, window_size=5):
-        self.threshold = threshold
-        self.adaptive = adaptive
-        self.window_size = window_size
-        self.last_frame = None
-        self.similarity_history = deque(maxlen=10)
-
-    def simplified_ssim(self, frame1, frame2, size=64):
-        """简化版SSIM计算，提高计算速度"""
-        # 先将帧下采样到较小尺寸以减少计算量
-        frame1_small = torch.nn.functional.interpolate(
-            frame1.unsqueeze(0), size=(size, size), mode='bilinear'
-        ).squeeze(0)
-        frame2_small = torch.nn.functional.interpolate(
-            frame2.unsqueeze(0), size=(size, size), mode='bilinear'
-        ).squeeze(0)
-
-        # 计算均值和方差
-        mu1 = frame1_small.mean()
-        mu2 = frame2_small.mean()
-
-        sigma1_sq = ((frame1_small - mu1) ** 2).mean()
-        sigma2_sq = ((frame2_small - mu2) ** 2).mean()
-        sigma12 = ((frame1_small - mu1) * (frame2_small - mu2)).mean()
-
-        # 简化SSIM计算
-        C1 = (0.01 * 1) ** 2
-        C2 = (0.03 * 1) ** 2
-
-        ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
-                   ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2))
-
-        return ssim_map.mean().item()
-
-    def should_process_all(self, frames):
-        """
-        判断是否需要处理所有帧
-        frames: (5, C, H, W) 的张量
-        返回: True如果需要处理所有帧，False如果只需处理中间帧
-        """
-        if self.last_frame is None:
-            self.last_frame = frames[2]  # 保存中间帧作为参考
-            self.similarity_history.append(0.5)  # 初始值
-            return True  # 第一组帧总是处理所有
-
-        # 计算当前帧与上一参考帧的相似度
-        current_similarity = self.simplified_ssim(self.last_frame, frames[2])
-        self.similarity_history.append(current_similarity)
-
-        # 自适应阈值计算
-        if self.adaptive and len(self.similarity_history) > 5:
-            # 计算相似度的均值和标准差
-            mean_sim = np.mean(self.similarity_history)
-            std_sim = np.std(self.similarity_history)
-            # 自适应阈值：均值减去0.5倍标准差
-            adaptive_threshold = max(0.7, min(0.95, float(mean_sim - 0.5 * std_sim)))
-        else:
-            adaptive_threshold = float(self.threshold)
-
-        # 更新参考帧
-        self.last_frame = frames[2]
-
-        # 如果相似度低于阈值，说明有较大变化，需要处理所有帧
-        return current_similarity < adaptive_threshold
-
-
-# 经验回放缓冲区（从adaptive_unet_main.py移植）
-class ExperienceReplayBuffer:
-    """经验回放缓冲区，用于存储和采样历史数据"""
-
-    def __init__(self, capacity=1000):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state, target):
-        """将数据添加到缓冲区"""
-        self.buffer.append((state, target))
-
-    def sample(self, batch_size):
-        """从缓冲区随机采样一批数据"""
-        if len(self.buffer) < batch_size:
-            return None
-        return random.sample(self.buffer, batch_size)
-
-    def __len__(self):
-        return len(self.buffer)
+# AMP
+try:
+    from torch.cuda.amp import autocast, GradScaler
+except Exception:
+    autocast = None
+    GradScaler = None
 
 
 def parse_args():
-    """参数配置 - 结合离线训练和在线学习的需求"""
     p = argparse.ArgumentParser("Online Universal Trainer")
 
     # 基础训练参数
     p.add_argument("--cfg", type=str, default=None, help="Optional YAML config")
-    p.add_argument("--data_root", type=str, required=True, help="Dataset root path")
+    p.add_argument("--video_root", type=str, default=None, help="Video root path")
 
     # 数据参数
     p.add_argument("--split", type=str, default="train")
@@ -181,23 +108,154 @@ def parse_args():
     p.add_argument("--offline_model_name", type=str, help="Model name for the offline model")
     p.add_argument("--offline_num_classes", type=int, help="Number of classes for the offline model")
 
+    # 学生（student）模型参数（已有 checkpoint）
+    p.add_argument("--student_model_path", type=str, help="Path to the trained student checkpoint (required)")
+    p.add_argument("--student_model_name", type=str, help="Student model name (e.g. adaptive_unet)", default=None)
+    p.add_argument("--student_num_classes", type=int, help="Number of classes for student model", default=None)
+
+    # 可选增强
+    p.add_argument("--save_pred_every_batch", action='store_true', default=True,
+                   help="Save student predictions for frames used for training before training")
+    p.add_argument("--max_train_samples_per_step", type=int, default=8,
+                   help="最大每步训练样本数（包括 experience replay），以避免 OOM")
+    p.add_argument("--use_amp", action='store_true', default=False, help="Use mixed precision (AMP) if available")
+
     return p.parse_args()
 
 
-# ==== 离线模型伪标签推理工具 ==== #
+class OnlineFrameDataset(Dataset):
+    def __init__(self, frame_paths, img_size=512, transform=None, sequence_length=5):
+        self.frame_paths = frame_paths
+        self.img_size = img_size
+        self.transform = transform
+        self.sequence_length = sequence_length
+
+    def __len__(self):
+        return max(0, len(self.frame_paths) - self.sequence_length + 1)
+
+    def __getitem__(self, index):
+        frames = []
+        for i in range(index, index + self.sequence_length):
+            img_path = self.frame_paths[i]
+            img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+            if img is None:
+                raise FileNotFoundError(f"Image not found: {img_path}")
+
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+            img = img.astype(np.float32) / 255.0
+            img = np.transpose(img, (2, 0, 1))
+            frames.append(torch.from_numpy(img).float())
+
+        frames = torch.stack(frames, dim=0)
+        dummy_mask = torch.zeros(1, self.img_size, self.img_size)
+        targets = torch.stack([dummy_mask] * self.sequence_length, dim=0)
+        return frames, targets
+
+
+class FrameSelector:
+    def __init__(self, threshold=0.9, adaptive=True, window_size=5):
+        self.threshold = threshold
+        self.adaptive = adaptive
+        self.window_size = window_size
+        self.last_frame = None
+        self.similarity_history = deque(maxlen=10)
+
+    def simplified_ssim(self, frame1, frame2, size=64):
+        frame1_small = torch.nn.functional.interpolate(
+            frame1.unsqueeze(0), size=(size, size), mode='bilinear'
+        ).squeeze(0)
+        frame2_small = torch.nn.functional.interpolate(
+            frame2.unsqueeze(0), size=(size, size), mode='bilinear'
+        ).squeeze(0)
+
+        mu1 = frame1_small.mean()
+        mu2 = frame2_small.mean()
+        sigma1_sq = ((frame1_small - mu1) ** 2).mean()
+        sigma2_sq = ((frame2_small - mu2) ** 2).mean()
+        sigma12 = ((frame1_small - mu1) * (frame2_small - mu2)).mean()
+
+        C1 = (0.01 * 1) ** 2
+        C2 = (0.03 * 1) ** 2
+
+        ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
+                   ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2))
+
+        return ssim_map.mean().item()
+
+    def should_process_all(self, frames):
+        if self.last_frame is None:
+            self.last_frame = frames[2]
+            self.similarity_history.append(0.5)
+            return True
+
+        current_similarity = self.simplified_ssim(self.last_frame, frames[2])
+        self.similarity_history.append(current_similarity)
+
+        if self.adaptive and len(self.similarity_history) > 5:
+            mean_sim = np.mean(self.similarity_history)
+            std_sim = np.std(self.similarity_history)
+            adaptive_threshold = max(0.7, min(0.95, float(mean_sim - 0.5 * std_sim)))
+        else:
+            adaptive_threshold = float(self.threshold)
+
+        self.last_frame = frames[2]
+        return current_similarity < adaptive_threshold
+
+
+class ExperienceReplayBuffer:
+    def __init__(self, capacity=1000):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, state, target):
+        self.buffer.append((state.detach().cpu().clone(), target.detach().cpu().clone()))
+
+    def sample(self, batch_size):
+        if len(self.buffer) < batch_size or batch_size == 0:
+            return None
+        return random.sample(self.buffer, batch_size)
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ==== 模型加载工具 ====
 def load_offline_model(model_path, model_name, num_classes, device):
-    from src.models.model_zoo import build_model
     model = build_model(model_name, num_classes=num_classes, in_ch=3)
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if 'model_state_dict' in checkpoint:
+        state = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        state = checkpoint['state_dict']
+    else:
+        state = checkpoint
+    model.load_state_dict(state)
     model.eval()
     model.to(device)
     return model
 
 
-class OnlineLearner:
-    """在线学习器，管理模型训练和缓冲区"""
+def load_student_model(model_path, model_name, num_classes, device):
+    model = build_model(model_name, num_classes=num_classes, in_ch=3)
+    checkpoint = torch.load(model_path, map_location=device)
+    if 'model_state_dict' in checkpoint:
+        state = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        state = checkpoint['state_dict']
+    else:
+        state = checkpoint
+    model.load_state_dict(state)
 
+    # 确保参数可训练
+    for p in model.parameters():
+        p.requires_grad = True
+
+    model.to(device)
+    model.train()
+    return model
+
+
+class OnlineLearner:
     def __init__(self, model, device, args, output_mgr, monitor,
                  offline_model_path=None, offline_model_name=None, offline_num_classes=None):
         self.model = model.to(device)
@@ -206,304 +264,354 @@ class OnlineLearner:
         self.output_mgr = output_mgr
         self.monitor = monitor
 
-        # 初始化帧选择器和回放缓冲区
-        self.frame_selector = FrameSelector(
-            threshold=args.frame_selector_threshold, adaptive=True
-        ) if args.use_frame_selector else None
-
-        self.buffer = ExperienceReplayBuffer(
-            args.replay_capacity
-        ) if args.use_replay_buffer else None
-
-        # 损失函数和优化器
         if args.binary:
             self.criterion = nn.BCEWithLogitsLoss()
         else:
             self.criterion = nn.CrossEntropyLoss()
 
-        # 只优化适配器参数（对于自适应模型）
-        adapter_params = []
-        for name, param in self.model.named_parameters():
-            if 'adapter' in name or not args.use_frame_selector:
-                adapter_params.append(param)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if not trainable_params:
+            for p in self.model.parameters():
+                p.requires_grad = True
+            trainable_params = list(self.model.parameters())
 
-        self.optimizer = torch.optim.Adam(adapter_params, lr=args.lr)
+        self.optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
         )
 
-        # 评估器
-        self.evaluator = Evaluator(device=device, threshold=0.5)
-
-        # 训练状态
-        self.loss_history = []
-        self.metrics_history = []
-
-        # ==== 离线模型加载（伪标签生成用）==== #
         self.offline_model = None
         if offline_model_path and offline_model_name and offline_num_classes:
             self.offline_model = load_offline_model(
                 offline_model_path, offline_model_name, offline_num_classes, device)
 
-    def process_single_frame(self, x):
-        """处理单帧的辅助函数"""
-        return self.model(x.unsqueeze(0)).squeeze(0)
+        self.evaluator = Evaluator(device=device, threshold=0.5)
+        self.loss_history = []
+        self.metrics_history = []
 
-    def adapt_step(self, inputs, targets):
-        """执行一步在线适应"""
-        self.model.train()
-        self.optimizer.zero_grad()
+        self.buffer = ExperienceReplayBuffer(capacity=args.replay_capacity) if args.use_replay_buffer else None
+        # ---- NEW: global step & best model tracking ----
+        self.global_step = 0
+        self.best_loss = float('inf')
+        try:
+            self.best_model_path = os.path.join(self.output_mgr.get_run_dir(), "student_best.pth")
+        except Exception:
+            self.best_model_path = os.path.join(project_root, "student_best.pth")
+        # === 新增EMA安全管理器 ===
+        self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0, cooldown_period=5)
 
-        processed_outputs = []
-        processed_targets = []
-        frame_stats = {'all_frames': 0, 'single_frame': 0}
-
-        # 处理每个样本的帧
-        for i in range(inputs.size(0)):
-            frames = inputs[i]  # (5, C, H, W)
-            target_frames = targets[i]  # (5, C, H, W)
-
-            # 检查是否需要处理所有帧
-            if self.frame_selector is None or self.frame_selector.should_process_all(frames):
-                frame_stats['all_frames'] += 1
-                # 处理所有5帧
-                for j in range(frames.size(0)):
-                    output = self.process_single_frame(frames[j])
-                    processed_outputs.append(output)
-                    processed_targets.append(target_frames[j])
-            else:
-                frame_stats['single_frame'] += 1
-                # 只处理中间帧（第3帧，索引2），然后复制结果
-                middle_output = self.process_single_frame(frames[2])
-                for j in range(frames.size(0)):
-                    processed_outputs.append(middle_output)
-                    processed_targets.append(target_frames[j])
-
-        # 转换为张量
-        outputs = torch.stack(processed_outputs, dim=0)
-        targets = torch.stack(processed_targets, dim=0)
-
-        # 从缓冲区采样历史数据
-        if self.buffer is not None:
-            replay_data = self.buffer.sample(min(8, len(self.buffer)))
-            if replay_data is not None:
-                replay_inputs, replay_targets = zip(*replay_data)
-                replay_inputs = torch.stack(replay_inputs).to(self.device)
-                replay_targets = torch.stack(replay_targets).to(self.device)
-
-                # 合并新旧数据
-                outputs = torch.cat([outputs, replay_inputs], dim=0)
-                targets = torch.cat([targets, replay_targets], dim=0)
-
-        # 计算损失
-        loss = self.criterion(outputs, targets)
-
-        # 反向传播和优化
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
-
-        # 将当前数据添加到缓冲区
-        if self.buffer is not None:
-            for i in range(outputs.size(0)):
-                self.buffer.push(
-                    outputs[i].detach().cpu(),
-                    targets[i].detach().cpu()
-                )
-
-        return loss.item(), frame_stats
-
-    @torch.no_grad()
-    def evaluate(self, data_loader):
-        """评估模型性能"""
-        self.model.eval()
-        return self.evaluator.evaluate(self.model, data_loader, self.criterion)
+    def _save_best_model_if_improved(self, loss_val):
+        if loss_val < self.best_loss:
+            self.best_loss = loss_val
+            try:
+                torch.save({'model_state_dict': self.model.state_dict(), 'loss': loss_val, 'step': self.global_step},
+                           self.best_model_path)
+                print(f"[INFO] Saved improved student model to {self.best_model_path} (loss={loss_val:.6f})")
+            except Exception as e:
+                print(f"[WARN] Failed to save best model: {e}")
 
     def run_online_learning(self, train_loader, val_loader=None):
-        """运行在线学习循环"""
         print("=" * 80)
         print(f"Starting Online Learning ({self.args.model}) for {self.args.online_steps} steps...")
 
-        # 初始化可视化器
         visualizer = Visualizer()
         viz_dir = self.output_mgr.get_vis_dir()
 
-        # 初始评估
-        if val_loader is not None:
-            initial_metrics = self.evaluate(val_loader)
-            self.metrics_history.append(initial_metrics)
-            print(f"Initial Metrics - Loss: {initial_metrics['val_loss']:.4f}, IoU: {initial_metrics['iou']:.4f}")
+        use_amp = self.args.use_amp and torch.cuda.is_available() and (autocast is not None)
+        scaler = GradScaler() if use_amp and GradScaler is not None else None
 
-        # 在线学习循环
         for step, (images, _) in enumerate(train_loader):
-            images = images.to(self.device)
-            # ==== 伪标签生成与训练 ====
-            if self.offline_model is not None:
-                # 先帧选择，再伪标签生成
-                batch_size, frames, c, h, w = images.shape  # (B, 5, C, H, W)
-                selected_indices = []
-                for i in range(batch_size):
-                    frame_group = images[i]  # (5, C, H, W)
-                    if self.frame_selector is None or self.frame_selector.should_process_all(frame_group):
-                        selected_indices.extend([(i, j) for j in range(frames)])
-                    else:
-                        selected_indices.append((i, 2))  # 只选中间帧
-                if not selected_indices:
-                    print(f"Step {step}: No frames selected for pseudo-labeling, skipping batch.")
-                    continue
-                # 收集选中的帧
-                selected_imgs = torch.stack([
-                    images[i, j] for (i, j) in selected_indices
-                ]).to(self.device)
-                with torch.no_grad():
-                    logits = self.offline_model(selected_imgs)
-                    probs = torch.softmax(logits, dim=1).cpu().numpy()
-                    pseudo_labels = torch.argmax(probs, axis=1)
-                    # 伪标签质控
-                    mask = quality_filter(probs, pseudo_labels)
-                    if not np.any(mask):
-                        print(f"Step {step}: No pseudo labels passed quality control, skipping batch.")
-                        continue
-                    pseudo_labels = torch.from_numpy(pseudo_labels[mask]).to(self.device)
-                    selected_imgs = selected_imgs[mask]
-                # 用伪标签训练online模型
-                self.model.train()
-                self.optimizer.zero_grad()
-                outputs = self.model(selected_imgs)
-                if self.args.binary:
-                    loss = self.criterion(outputs, pseudo_labels.float())
+            if self.global_step >= self.args.online_steps:
+                break
+
+            images = images.to(self.device, non_blocking=True)
+            batch_size, seq_len, c, h, w = images.shape
+
+            # 1) student 预测整个 batch (no grad)
+            self.model.eval()
+            with torch.no_grad():
+                flat_imgs = images.view(batch_size * seq_len, c, h, w)
+                student_logits = self.model(flat_imgs)
+                if student_logits.shape[1] == 1:
+                    probs = torch.sigmoid(student_logits)
+                    student_preds = (probs > 0.5).float().squeeze(1)
                 else:
-                    loss = self.criterion(outputs, pseudo_labels)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
-                self.loss_history.append(loss.item())
-                frame_stats = {'all_frames': 0, 'single_frame': 0} # 伪标签流程不统计帧选择
-            else:
-                loss = None
-                frame_stats = None
+                    student_preds = torch.argmax(student_logits, dim=1)
+            print("Unique preds:", torch.unique(student_preds))
+            if self.args.save_viz:
+                batch_viz_dir = os.path.join(viz_dir, f"step_{self.global_step}_preds")
+                os.makedirs(batch_viz_dir, exist_ok=True)
+                for i in range(student_preds.size(0)):
+                    pred_np = student_preds[i].cpu().numpy().astype(np.uint8)
+                    img_np = flat_imgs[i].cpu().numpy().transpose(1, 2, 0)
+                    if img_np.max() <= 1.0:
+                        img_vis = (img_np * 255).astype(np.uint8)
+                    else:
+                        img_vis = img_np.astype(np.uint8)
 
-            # 监控进度
-            if step % self.args.monitor_interval == 0:
-                if loss is not None:
-                    self.monitor.print_progress(
-                        step + 1, self.args.online_steps,
-                        0, 0,
-                        {"loss": loss},
-                        refresh=True
-                    )
-                if self.frame_selector is not None and frame_stats is not None:
-                    total = frame_stats['all_frames'] + frame_stats['single_frame']
-                    if total > 0:
-                        all_percent = 100 * frame_stats['all_frames'] / total
-                        single_percent = 100 * frame_stats['single_frame'] / total
-                        print(f"  Frame processing: All={all_percent:.1f}%, Single={single_percent:.1f}%")
+                    overlay = visualizer.create_overlay_image(img_vis, pred_np)
+                    save_path = os.path.join(batch_viz_dir, f"pred_{i:03d}.png")
+                    plt.imsave(save_path, overlay)
 
-            # 定期评估
-            if val_loader is not None and step % self.args.eval_interval == 0:
-                if loss is not None:
-                    val_metrics = self.evaluate(val_loader)
-                    self.metrics_history.append(val_metrics)
-                    combined_metrics = {"step": step, "train_loss": loss}
-                    combined_metrics.update(val_metrics)
-                    self.output_mgr.save_metrics_csv(combined_metrics, step)
-                    print(
-                        f"[Step {step}] "
-                        f"Val loss: {val_metrics['val_loss']:.4f} | "
-                        f"IoU: {val_metrics['iou']:.4f} | Dice: {val_metrics['dice']:.4f}"
-                    )
+            # 2) 选帧（frame selector）——得到 selected_indices 列表
+            selected_indices = []
+            for i in range(batch_size):
+                frame_group = images[i]
+                if self.args.use_frame_selector and FrameSelector(threshold=self.args.frame_selector_threshold).should_process_all(frame_group):
+                    selected_indices.extend([(i, j) for j in range(seq_len)])
+                else:
+                    selected_indices.append((i, seq_len // 2))
 
-            # 定期可视化
-            if self.args.save_viz and step % self.args.viz_interval == 0 and val_loader is not None:
-                print(f"Generating visualizations at step {step}...")
-                step_viz_dir = os.path.join(viz_dir, f"step_{step}")
-                os.makedirs(step_viz_dir, exist_ok=True)
+            # map to flattened indices
+            selected_flat_indices = [i * seq_len + j for (i, j) in selected_indices]
 
-                visualizer.save_comparison_predictions(
-                    self.model, val_loader, step_viz_dir,
-                    max_samples=self.args.viz_samples, device=self.device
+
+            # 3) teacher 对 selected frames 生成伪标签（只运行在选中的小集合上，减少显存占用）
+            if self.offline_model is None or len(selected_flat_indices) == 0:
+                # increment global step to avoid repeating the same step across calls
+                self.global_step += 1
+                continue
+
+            # 构造 selected imgs 张量并送到 device
+            sel_pairs = [(idx // seq_len, idx % seq_len) for idx in selected_flat_indices]
+            selected_imgs_for_teacher = torch.stack([images[i, j] for (i, j) in sel_pairs], dim=0).to(self.device)
+
+            with torch.no_grad():
+                teacher_logits = self.offline_model(selected_imgs_for_teacher)
+                if teacher_logits.shape[1] == 1:
+                    teacher_probs = torch.sigmoid(teacher_logits).cpu().numpy()
+                    pseudo_labels_np = (teacher_probs > 0.5).astype(np.uint8)[:, 0, ...]
+                else:
+                    teacher_probs_soft = torch.softmax(teacher_logits, dim=1)
+                    teacher_probs = teacher_probs_soft.cpu().numpy()
+                    pseudo_labels_np = np.argmax(teacher_probs, axis=1)
+
+            # free teacher tensors from GPU ASAP
+            try:
+                del teacher_logits
+                if 'teacher_probs_soft' in locals():
+                    del teacher_probs_soft
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+
+            # === 新增伪标签质控（更细致） ===
+            try:
+                pseudo_labels_np = denoise_pseudo_label(
+                    pseudo_labels_np[np.newaxis, ...] if pseudo_labels_np.ndim==2 else pseudo_labels_np,
+                    min_area=100, morph_op='open', morph_structure=np.ones((3,3))
                 )
+                if pseudo_labels_np.shape[0] == 1:
+                    pseudo_labels_np = pseudo_labels_np[0]
+                pixel_masks = pixel_gate_mask(teacher_probs, pseudo_labels_np)
+                mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs, pseudo_labels_np, pixel_masks)
+            except Exception:
+                mask_ok = np.ones(len(pseudo_labels_np), dtype=bool)
 
+            if not np.any(mask_ok):
+                self.global_step += 1
+                continue
 
-        # 最终可视化
-        if self.args.save_viz and val_loader is not None:
-            print("Generating final visualizations...")
-            final_viz_dir = os.path.join(viz_dir, "final")
-            os.makedirs(final_viz_dir, exist_ok=True)
+            # 只保留通过 QC 的样本
+            kept_idx = np.where(mask_ok)[0]
+            kept_global_flat_indices = [selected_flat_indices[i] for i in kept_idx]
 
-            visualizer.save_comparison_predictions(
-                self.model, val_loader, final_viz_dir,
-                max_samples=self.args.viz_samples, device=self.device
-            )
+            # 准备训练用数据（在 GPU 上）
+            selected_imgs_train = selected_imgs_for_teacher[kept_idx].to(self.device)
+            pseudo_targets_np = pseudo_labels_np[kept_idx]
+            if self.args.binary:
+                pseudo_targets = torch.from_numpy(pseudo_targets_np).float().unsqueeze(1).to(self.device)
+            else:
+                pseudo_targets = torch.from_numpy(pseudo_targets_np).long().to(self.device)
 
-        return self.loss_history, self.metrics_history
+            # 4) 限制训练样本数量（包含 replay），避免 OOM
+            max_samples = max(1, int(self.args.max_train_samples_per_step))
+            replay_samples = []
+            if self.buffer is not None and len(self.buffer) > 0:
+                # we will sample at most max_samples//2 from replay to keep mix
+                n_replay = min(max_samples // 2, len(self.buffer))
+                replay_data = self.buffer.sample(n_replay) if n_replay > 0 else None
+                if replay_data is not None:
+                    replay_inputs, replay_targets = zip(*replay_data)
+                    replay_inputs = torch.stack(replay_inputs).to(self.device)
+                    replay_targets = torch.stack(replay_targets).to(self.device)
+                    replay_samples = (replay_inputs, replay_targets)
+
+            # if too many teacher samples, randomly pick
+            if selected_imgs_train.size(0) > max_samples:
+                perm = torch.randperm(selected_imgs_train.size(0), device=self.device)
+                sel = perm[:max_samples]
+                selected_imgs_train = selected_imgs_train[sel]
+                pseudo_targets = pseudo_targets[sel]
+
+            # merge replay if any and keep total <= max_samples
+            if replay_samples:
+                r_in, r_tg = replay_samples
+                needed = max_samples - selected_imgs_train.size(0)
+                if needed > 0:
+                    r_in = r_in[:needed]
+                    r_tg = r_tg[:needed]
+                    selected_imgs_train = torch.cat([selected_imgs_train, r_in], dim=0)
+                    pseudo_targets = torch.cat([pseudo_targets, r_tg], dim=0)
+
+            # 5) 用伪标签训练 student（支持 AMP）
+            if selected_imgs_train.size(0) == 0:
+                self.global_step += 1
+                continue
+
+            self.model.train()
+            self.optimizer.zero_grad()
+
+            if use_amp:
+                with autocast():
+                    outputs = self.model(selected_imgs_train)
+                    if self.args.binary:
+                        loss_tensor = self.criterion(outputs, pseudo_targets.float())
+                    else:
+                        loss_tensor = self.criterion(outputs, pseudo_targets.long())
+                scaler.scale(loss_tensor).backward()
+                scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # === EMA安全机制 ===
+                skip_update = self.ema_safety.step(loss_tensor.item(), self.model)
+                if skip_update:
+                    print(f"[Step {self.global_step}] EMA/异常/冷却机制触发，跳过参数更新。")
+                else:
+                    scaler.step(self.optimizer)
+                scaler.update()
+            else:
+                outputs = self.model(selected_imgs_train)
+                if self.args.binary:
+                    loss_tensor = self.criterion(outputs, pseudo_targets.float())
+                else:
+                    loss_tensor = self.criterion(outputs, pseudo_targets.long())
+                loss_tensor.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # === EMA安全机制 ===
+                skip_update = self.ema_safety.step(loss_tensor.item(), self.model)
+                if skip_update:
+                    print(f"[Step {self.global_step}] EMA/异常/冷却机制触发，跳过参数更新。")
+                else:
+                    self.optimizer.step()
+
+            self.loss_history.append(float(loss_tensor.item()))
+
+            # push to replay buffer
+            if self.buffer is not None:
+                for idx in range(selected_imgs_train.size(0)):
+                    t_in = selected_imgs_train[idx].detach().cpu().clone()
+                    t_target = pseudo_targets[idx].detach().cpu().clone()
+                    self.buffer.push(t_in, t_target)
+
+            # 保存最佳模型（实时）
+            try:
+                self._save_best_model_if_improved(float(loss_tensor.item()))
+            except Exception as e:
+                print(f"[WARN] _save_best_model_if_improved failed: {e}")
+
+            # free some memory
+            try:
+                del selected_imgs_train, pseudo_targets, outputs
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+
+            # 增加全局 step，防止重复覆盖
+            self.global_step += 1
+
+        self.last_results = (self.loss_history, self.metrics_history)
+        return self.last_results
 
 
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 初始化监控器和输出管理器
     monitor = TrainMonitor(enable_gpu_monitor=args.enable_gpu_monitor)
     monitor.start_timing()
 
-    model_tag = args.model if args.model_type is None else args.model_type
-    output_mgr = OutputManager(model_type=model_tag, run_type="online")
+    output_mgr = OutputManager(model_type=args.model)
     output_mgr.save_config(vars(args))
 
-    # 加载数据集
-    # 注意：在线学习通常使用流式数据，这里使用数据集作为示例
-    dataset = SegDatasetMin(
-        args.data_root, 
-        dtype=args.split, 
-        img_size=args.img_size,
-        apply_fov_mask=args.apply_fov_mask
-    )
-    data_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
+    if not args.student_model_path or not args.student_model_name or args.student_num_classes is None:
+        raise ValueError("student_model_path, student_model_name and student_num_classes must be provided to load existing student model.")
 
-    # 创建验证集用于评估和可视化
-    val_dataset = SegDatasetMin(
-        args.data_root, 
-        dtype="val", 
-        img_size=args.img_size,
-        apply_fov_mask=args.apply_fov_mask
+    print(f"Loading student model from {args.student_model_path} ...")
+    student_model = load_student_model(
+        args.student_model_path,
+        args.student_model_name,
+        args.student_num_classes,
+        device
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers
-    )
+    print("Student model loaded.")
 
-    # 创建模型
-    num_classes = 1 if args.binary else args.num_classes
-    model = build_model(args.model, num_classes=num_classes, in_ch=3)
-
-    # 初始化在线学习器
     learner = OnlineLearner(
-        model, device, args, output_mgr, monitor,
+        student_model, device, args, output_mgr, monitor,
         offline_model_path=args.offline_model_path,
         offline_model_name=args.offline_model_name,
         offline_num_classes=args.offline_num_classes
     )
 
-    # 运行在线学习
-    loss_history, metrics_history = learner.run_online_learning(data_loader, val_loader)
+    def train_fn(batch_dir_path):
+        batch_frames = sorted(glob.glob(os.path.join(batch_dir_path, "*.png")))
+        if len(batch_frames) < 5:
+            print(f"Warning: Not enough frames in {batch_dir_path}, skipping batch")
+            return
 
-    # 打印总结
+        print(f"Processing batch with {len(batch_frames)} frames: {batch_dir_path}")
+
+        dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=5)
+        data_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True
+        )
+
+        learner.run_online_learning(data_loader, None)
+
+    extractor = VideoFrameExtractor(output_dir="src/dataio/datasets")
+    extractor.extract(
+        video_path=args.video_root,
+        fps=2,
+        start=10,
+        end=60,
+        size=(args.img_size, args.img_size),
+        fmt="png",
+        batch_size=5,
+        mode=2,
+        train_fn=train_fn
+    )
+
+    loss_history, metrics_history = learner.last_results if hasattr(learner, 'last_results') else ([], [])
     summary = output_mgr.get_run_summary()
     final_metrics = metrics_history[-1] if metrics_history else {}
-    print(f"\n--> Online Learning Completed <--")
-    print(f"Results saved to: {summary['run_dir']}")
+    print(f"--> Online Learning Completed <--")
+    print(f"Results saved to: {summary.get('run_dir', 'N/A')}")
     if final_metrics:
-        print(f"Final Metrics - Loss: {final_metrics['val_loss']:.4f}, IoU: {final_metrics['iou']:.4f}")
+        print(f"Final Metrics - Loss: {final_metrics.get('val_loss', 0):.4f}, IoU: {final_metrics.get('iou', 0):.4f}")
 
+    # === 合并所有 step_* 目录下的预测帧为视频 ===
+    try:
+        viz_dir = output_mgr.get_vis_dir()
+        step_dirs = sorted([str(p) for p in Path(viz_dir).iterdir()
+                            if p.is_dir() and p.name.startswith("step_")])
+
+        if step_dirs:
+            video_out = os.path.join(summary.get("run_dir", "./outputs"), "pred_overlay.mp4")
+            merger = VideoFrameMerger(
+                frame_dirs=step_dirs,
+                output_path=video_out,
+                fps=2,              # 建议和 extractor.extract() 里的 fps 保持一致
+                fourcc="mp4v",
+                auto_batches=False  # 因为这里不是 batch_x，而是 step_x
+            )
+            merger.merge()
+        else:
+            print(f"[WARN] No step_* directories found in {viz_dir}")
+    except Exception as e:
+        print(f"[WARN] Failed to merge video: {e}")
 
 if __name__ == "__main__":
     main()
