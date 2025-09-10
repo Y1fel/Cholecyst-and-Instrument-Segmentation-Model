@@ -54,6 +54,7 @@ def compute_fov_mask_from_rgb(rgb_uint8: np.ndarray, thr=None) -> np.ndarray:
 
     return in_fov
 
+# 
 class SegDatasetMin(Dataset):
     def __init__(self,
             data_root: str,
@@ -66,7 +67,7 @@ class SegDatasetMin(Dataset):
             classification_scheme: str = None, # abandoned
             custom_mapping: dict       = None, # abandoned
             target_classes: list       = None, # abandoned
-            allow_no_mask: bool = False
+            allow_no_mask: bool = False,
             apply_fov_mask: bool       = False,
         ):
 
@@ -212,15 +213,8 @@ class SegDatasetMin(Dataset):
         # 这里保存 uint8 的副本用于 FOV
         rgb_uint8_resized = img_rgb.copy()
 
-        # FOV
-        img_rgb = cv2.cvtColor(cv2.imread(img_path, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
-        img_rgb = cv2.resize(img_rgb, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
-
-        # 这里保存 uint8 的副本用于 FOV
-        rgb_uint8_resized = img_rgb.copy()
-
-        # read images
-        img = cv2.imread(img_path, cv2.IMREAD_COLOR)  # from BGR to RGB
+        #  read images
+        img = cv2.imread(img_path, cv2.IMREAD_COLOR) # from BGR to RGB
         if img is None:
             raise FileNotFoundError(f"Image not found: {img_path}")
         
