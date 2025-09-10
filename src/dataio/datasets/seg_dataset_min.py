@@ -20,7 +20,6 @@ def _ellipse_inside_mask(h, w, margin=2):
     norm = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2
     return norm <= 1.0
 
-# 
 class SegDatasetMin(Dataset):
     def __init__(self,
             data_root: str,
@@ -33,6 +32,7 @@ class SegDatasetMin(Dataset):
             classification_scheme: str = None, # abandoned
             custom_mapping: dict       = None, # abandoned
             target_classes: list       = None, # abandoned
+            allow_no_mask: bool = False
         ):
 
         self.data_root = os.path.abspath(data_root)
@@ -128,10 +128,13 @@ class SegDatasetMin(Dataset):
 
             if mask_path is not None:
                 pairs.append((img_path, mask_path))
+            elif allow_no_mask:   # 如果允许无 mask，就直接收图像
+                pairs.append((img_path, None))
 
-        assert len(pairs) > 0, (
-            f"No image-mask pairs found under {self.data_root}.\n"
-            "Example expected: .../frame_80_endo.png  +  .../frame_80_endo_color_mask.png")
+        if not allow_no_mask:
+            assert len(pairs) > 0, (
+                f"No image-mask pairs found under {self.data_root}.\n"
+                "Example expected: .../frame_80_endo.png  +  .../frame_80_endo_color_mask.png")
         
         self.pairs = pairs # [(img_path, mask_path), ...]
         
@@ -163,26 +166,31 @@ class SegDatasetMin(Dataset):
     def __len__(self):
        return len(self.pairs)
 
-
     def __getitem__(self, index):
         img_path, mask_path = self.pairs[index]
 
-        #  read images
-        img = cv2.imread(img_path, cv2.IMREAD_COLOR) # from BGR to RGB
+        # === 读取图像 ===
+        img = cv2.imread(img_path, cv2.IMREAD_COLOR)  # from BGR to RGB
         if img is None:
             raise FileNotFoundError(f"Image not found: {img_path}")
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)        
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img,
                          (self.img_size, self.img_size),
-                         interpolation = cv2.INTER_LINEAR) # resize to target size (same size for both img and mask)
+                         interpolation=cv2.INTER_LINEAR)  # resize to target size (same size for both img and mask)
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))  # HWC to CHW
+        img_tensor = torch.from_numpy(img).float()
+
+        # === 如果没有 mask，就返回 dummy ===
+        if mask_path is None:
+            dummy_mask = torch.zeros((self.img_size, self.img_size), dtype=torch.long)
+            return img_tensor, dummy_mask
 
         # read mask
         mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
         if mask is None:
             raise FileNotFoundError(f"Mask not found: {mask_path}")
-        
+
         # 处理精确GT文件（单通道）和原始mask文件（可能是3通道）
         if mask.ndim == 3:
             # 检查是否是精确GT（应该是单通道但被保存为3通道）
@@ -198,7 +206,6 @@ class SegDatasetMin(Dataset):
         else:
             if index < 3:  # 只显示前3个样本的详细信息
                 print(f"[SINGLE_CH] 使用单通道mask: {os.path.basename(mask_path)}")
-
 
         # === 多类分支：标准两段式映射（唯一来源） ===
         if not self.is_binary:
@@ -227,10 +234,7 @@ class SegDatasetMin(Dataset):
             m = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
 
             mask_tensor = torch.from_numpy(m).long()
-            img_tensor  = torch.from_numpy(img).float()
             return img_tensor, mask_tensor
-
-
 
     def _get_multiclass_mask_candidates(self, stem):
         """多分类任务的mask候选列表（watershed优先）"""

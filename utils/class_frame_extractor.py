@@ -124,6 +124,7 @@ class VideoFrameExtractor:
             while True:
                 batch_dir_path = q.get()
                 if batch_dir_path is None:
+                    q.task_done()
                     break
                 if train_fn:
                     train_fn(batch_dir_path)  # 🔥 回调传目录路径
