@@ -30,7 +30,7 @@ student_model: "adaptive_unet"      # 轻量Student模型
 
 # Teacher预训练权重（示例路径，需要根据第一步实际输出更新）
 # 格式：outputs/unet_plus_plus_<timestamp>/checkpoints/unet_plus_plus_best.pth
-teacher_checkpoint: "outputs/baseline_multi_20250829_193820/checkpoints/baseline_multi_best.pth"  # 使用现有的3class Teacher模型
+teacher_checkpoint: "outputs/unet_plus_plus_20250906_033807/checkpoints/unet_plus_plus_best.pth"  # 使用现有的3class Teacher模型
 
 # 蒸馏超参数（经过优化的设置）
 distill_temperature: 4.0      # 软化Teacher输出

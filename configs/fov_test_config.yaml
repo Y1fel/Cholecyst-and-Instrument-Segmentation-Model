@@ -1,0 +1,31 @@
+# FOV Test Configuration
+# 测试apply_fov_mask功能的配置文件
+
+# 基础参数
+epochs: 2
+batch_size: 2
+lr: 0.001
+img_size: 256
+num_classes: 3
+
+# 数据配置
+binary: false
+val_ratio: 0.3
+classification_scheme: "3class_org"
+
+# FOV处理
+apply_fov_mask: true  # 启用FOV mask测试
+
+# 模型配置
+model: "unet_min"
+enable_distillation: false
+
+# 训练配置
+optimizer: "adamw"
+scheduler: "cosine"
+augment: true
+
+# 监控
+enable_gpu_monitor: false
+save_viz: false
+monitor_interval: 1

@@ -71,37 +71,77 @@ REGION_SEPARATION_COLORS = {
 
 # Watershed灰度值 → 基础语义ID (0..12) 映射表
 # 这是解决标签对齐问题的关键映射
+# WATERSHED_TO_BASE_CLASS = {
+#     # 忽略/背景
+#     255: 255,   # 明确忽略
+#     0:   0,     # 内圈黑边或背景（若你希望不计入训练，可改成 255）
+
+#     # 典型“背景”灰度
+#     11: 0, 12: 0, 13: 0, 50: 0,
+
+#     # 目标器官（本阶段合并为“胆囊”代表类 10；到 6/12 类时再细分）
+#     21: 10,
+#     22: 10,
+
+#     # 器械两子类（统一会在 3 类方案里映到 instrument=1）
+#     31: 5,      # grasper
+#     32: 9,      # L-hook
+
+#     # 其余较少出现的灰度，先并入“背景/解剖组织”以避免误导 3 类训练
+#     23: 0,
+#     24: 0,
+#     25: 0,
+# }
+
+
+# Watershed灰度值 → 基础语义ID (0..12)
+# 同时兼容：
+#   - 官方灰度（5,17,18,19,33,34,35,36,37,49,50,51,80）
+#   - 两位数别名（11,12,13,21,22,23,24,25,31,32,50）
 WATERSHED_TO_BASE_CLASS = {
-    # 忽略/背景
-    255: 255,   # 明确忽略
-    0:   0,     # 内圈黑边或背景（若你希望不计入训练，可改成 255）
+    # ignore / 黑边
+    255: 255,
+    0:   0,
 
-    # 典型“背景”灰度
-    11: 0, 12: 0, 13: 0, 50: 0,
+    # —— 官方灰度 → 基础类ID ——
+    80:  0,  # #505050 background
+    17:  1,  # #111111 abdominal_wall
+    33:  2,  # #212121 liver
+    19:  3,  # #131313 gastrointestinal_tract
+    18:  4,  # #121212 fat
+    49:  5,  # #313131 grasper
+    35:  6,  # #232323 connective_tissue
+    36:  7,  # #242424 blood
+    37:  8,  # #252525 cystic_duct
+    50:  9,  # #323232 l_hook_electrocautery
+    34: 10,  # #222222 gallbladder
+    51: 11,  # #333333 hepatic_vein
+    5:  12,  # #050505 liver_ligament
 
-    # 目标器官（本阶段合并为“胆囊”代表类 10；到 6/12 类时再细分）
-    21: 10,
-    22: 10,
-
-    # 器械两子类（统一会在 3 类方案里映到 instrument=1）
-    31: 5,      # grasper
-    32: 9,      # L-hook
-
-    # 其余较少出现的灰度，先并入“背景/解剖组织”以避免误导 3 类训练
-    23: 0,
-    24: 0,
-    25: 0,
+    # —— 两位数别名 → 基础类ID（你的数据里实际出现的）——
+    11: 1,   # 代表 #111111 -> abdominal_wall
+    12: 4,   # #121212 -> fat
+    13: 3,   # #131313 -> gastrointestinal_tract
+    21: 2,   # #212121 -> liver
+    22: 10,  # #222222 -> gallbladder  ← 胆囊（关键！）
+    23: 6,   # #232323 -> connective_tissue
+    24: 7,   # #242424 -> blood
+    25: 8,   # #252525 -> cystic_duct
+    31: 5,   # #313131 -> grasper
+    32: 9,   # #323232 -> l_hook_electrocautery
+    # （50 已在官方灰度段映射为 9，无需重复）
 }
 
-WATERSHED_TO_BASE = {   # 依据 seg8k 版式，按你的统计完善
-  11: 'background', 12: 'instrument', 13: 'instrument',
-  21: 'target',     22: 'target',      31: 'liver',
-  50: 'abdominal_wall', 255: 'ignore'
-}
-BASE_TO_TRAIN_3C = {      # 3类任务映射
-  'background': 0, 'liver': 0, 'abdominal_wall': 0,
-  'instrument': 1, 'target': 2, 'ignore': 255
-}
+
+# WATERSHED_TO_BASE = {   # 依据 seg8k 版式，按你的统计完善
+#   11: 'background', 12: 'instrument', 13: 'instrument',
+#   21: 'target',     22: 'target',      31: 'liver',
+#   50: 'abdominal_wall', 255: 'ignore'
+# }
+# BASE_TO_TRAIN_3C = {      # 3类任务映射
+#   'background': 0, 'liver': 0, 'abdominal_wall': 0,
+#   'instrument': 1, 'target': 2, 'ignore': 255
+# }
 
 # 基础13类定义（对应Kaggle数据集）
 BASE_CLASSES = {
@@ -144,7 +184,7 @@ CLASSIFICATION_SCHEMES = {
             9: 1,   # L-hook → 器械  
             10: 2   # Gallbladder → 目标器官
         },
-        "default_for_others": 255,  # 关键：未命中的都设为ignore，不是背景！
+        "default_for_others": 0,  # 关键：未命中的都设为ignore，不是背景！
         "description": "背景 vs 器械 vs 目标器官（语义对齐版本）"
     },
     

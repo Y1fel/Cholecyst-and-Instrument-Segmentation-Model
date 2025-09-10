@@ -2,23 +2,57 @@
 最小分割数据集类
 支持标准的 images/ 和 masks/ 目录结构
 """
-
+import scipy.ndimage as ndi
 import os, glob, cv2, numpy as np, torch
 from torch.utils.data import Dataset
 from src.common.constants import DATASET_CONFIG
 from src.common.constants import generate_class_mapping, CLASSIFICATION_SCHEMES, WATERSHED_TO_BASE_CLASS
 
 # helper to get valid endoscope ellipse region
-def _ellipse_inside_mask(h, w, margin=2):
-    """返回一个布尔mask：True 表示在椭圆视野内，False 表示黑边区域。
-    margin: 轻微收缩，避免边缘锯齿的误判。
+# def _ellipse_inside_mask(h, w, margin=2):
+#     """返回一个布尔mask：True 表示在椭圆视野内，False 表示黑边区域。
+#     margin: 轻微收缩，避免边缘锯齿的误判。
+#     """
+#     yy, xx = np.ogrid[:h, :w]
+#     cy, cx = h / 2.0, w / 2.0
+#     # 视野大致是内接椭圆（假设4:3/1:1都能容忍）
+#     ry, rx = (h / 2.0 - margin), (w / 2.0 - margin)
+#     norm = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2
+#     return norm <= 1.0
+
+def compute_fov_mask_from_rgb(rgb_uint8: np.ndarray, thr=None) -> np.ndarray:
     """
-    yy, xx = np.ogrid[:h, :w]
-    cy, cx = h / 2.0, w / 2.0
-    # 视野大致是内接椭圆（假设4:3/1:1都能容忍）
-    ry, rx = (h / 2.0 - margin), (w / 2.0 - margin)
-    norm = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2
-    return norm <= 1.0
+    从已resize到目标尺寸的 RGB 图，鲁棒地估计内镜视野(FOV)。
+    返回 bool 数组：True=视野内, False=视野外黑环。
+    """
+    # 灰度 + 自适应阈值
+    gray = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2GRAY)
+
+    # 经验：黑环通常非常接近 0。用分位数自适应一个阈值，
+    # 如果图里几乎没有黑环，会得到很低的比例，后面有保护。
+    if thr is None:
+        p1 = np.percentile(gray, 1)
+        thr = max(5, min(20, p1 + 2))  # 5~20 之间的自适应阈值
+
+    # 先把“非黑环”找出来
+    in_fov = gray > thr
+
+    # 形态学清理 & 取最大连通域（避免角落/器械阴影误判）
+    in_fov = ndi.binary_closing(in_fov, structure=np.ones((5, 5), bool))
+    labeled, num = ndi.label(in_fov)
+    if num > 0:
+        sizes = ndi.sum(np.ones_like(gray), labeled, index=np.arange(1, num + 1))
+        keep = (labeled == (1 + np.argmax(sizes)))
+        in_fov = keep
+    else:
+        in_fov = np.ones_like(gray, dtype=bool)
+
+    # 保护：如果“外圈像素比例”< 5%，直接认为全视野，避免过度屏蔽
+    border_ratio = 1.0 - in_fov.mean()
+    if border_ratio < 0.05:
+        in_fov[:] = True
+
+    return in_fov
 
 # 
 class SegDatasetMin(Dataset):
@@ -29,6 +63,7 @@ class SegDatasetMin(Dataset):
             classification_scheme: str = None, # abonded
             custom_mapping: dict       = None, # abonded
             target_classes: list       = None, # abonded
+            apply_fov_mask: bool       = False,
         ):
 
         self.data_root = os.path.abspath(data_root)
@@ -38,6 +73,7 @@ class SegDatasetMin(Dataset):
         self.return_multiclass = bool(return_multiclass)
         self.ignore_index = int(ignore_index)
         # self.target_classes = target_classes  # 添加缺失的属性
+        self.apply_fov_mask = bool(apply_fov_mask)
 
         # 优先使用新的class_id_map，fallback到旧逻辑
         if class_id_map is not None:
@@ -163,14 +199,24 @@ class SegDatasetMin(Dataset):
     def __getitem__(self, index):
         img_path, mask_path = self.pairs[index]
 
+        # FOV
+        img_rgb = cv2.cvtColor(cv2.imread(img_path, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        img_rgb = cv2.resize(img_rgb, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+
+        # 这里保存 uint8 的副本用于 FOV
+        rgb_uint8_resized = img_rgb.copy()
+
         #  read images
         img = cv2.imread(img_path, cv2.IMREAD_COLOR) # from BGR to RGB
         if img is None:
             raise FileNotFoundError(f"Image not found: {img_path}")
+        
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)        
         img = cv2.resize(img,
                          (self.img_size, self.img_size),
                          interpolation = cv2.INTER_LINEAR) # resize to target size (same size for both img and mask)
+        
+        # 归一化到 0~1
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))  # HWC to CHW
 
@@ -222,6 +268,11 @@ class SegDatasetMin(Dataset):
             # 最近邻缩放，保持离散标签
             m = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
 
+            if self.apply_fov_mask:
+                fov = compute_fov_mask_from_rgb(rgb_uint8_resized)  # True=视野内
+                # 选择一种：训练推荐置背景0；评测/可视化若想忽略可用 255
+                m[~fov] = 0   # 或者 m[~fov] = self.ignore_index
+                
             mask_tensor = torch.from_numpy(m).long()
             img_tensor  = torch.from_numpy(img).float()
             return img_tensor, mask_tensor

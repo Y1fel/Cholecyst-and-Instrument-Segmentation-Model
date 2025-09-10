@@ -221,19 +221,45 @@ class OutputManager:
             print(f"Error reading metrics CSV: {e}")
             return []
         
-
-# ---------- 预留扩展接口 ---------- 
-    def save_advanced_checkpoint(self, model, optimizer, scheduler, **kwargs):
-        """预留接口：保存完整检查点"""
-        # TODO: 未来实现完整的检查点保存（包含优化器、调度器等）
-        pass
+    def get_kd_experiment_dir(self) -> str:
+        """获取KD实验专用目录"""
+        kd_dir = os.path.join(self.run_dir, "kd_experiment")
+        os.makedirs(kd_dir, exist_ok=True)
+        return kd_dir
     
-    def setup_tensorboard(self, log_dir=None):
-        """预留接口：设置TensorBoard日志"""
-        # TODO: 未来添加TensorBoard支持
-        pass
+    def get_kd_comparison_csv_path(self) -> str:
+        """获取KD对比表格CSV路径"""
+        return os.path.join(self.get_kd_experiment_dir(), "kd_comparison_results.csv")
     
-    def export_results_summary(self, format='json'):
-        """预留接口：导出结果摘要"""
-        # TODO: 未来实现结果导出功能
-        pass
+    def get_calibration_analysis_dir(self) -> str:
+        """获取校准分析目录"""
+        cal_dir = os.path.join(self.run_dir, "calibration_analysis")
+        os.makedirs(cal_dir, exist_ok=True)
+        return cal_dir
+    
+    def get_reliability_diagram_path(self, regime_name: str) -> str:
+        """获取可靠性图保存路径"""
+        return os.path.join(self.get_calibration_analysis_dir(), 
+                           f"reliability_diagram_{regime_name}.png")
+    
+    def save_kd_experiment_summary(self, experiment_data: Dict):
+        """保存KD实验总结"""
+        summary_path = os.path.join(self.get_kd_experiment_dir(), "experiment_summary.json")
+        
+        summary = {
+            "timestamp": self.timestamp,
+            "experiment_type": "knowledge_distillation_comparison",
+            "run_dir": self.run_dir,
+            "experiment_data": experiment_data,
+            "files": {
+                "comparison_csv": self.get_kd_comparison_csv_path(),
+                "calibration_dir": self.get_calibration_analysis_dir(),
+                "visualizations": self.get_vis_dir()
+            }
+        }
+        
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print(f"KD experiment summary saved to: {summary_path}")
+        return summary_path

@@ -134,6 +134,10 @@ def parse_args():
     p.add_argument("--flip_prob", type=float, default=0.5, help="Horizontal flip probability")
     p.add_argument("--rotation_degree", type=int, default=15, help="random rotation range")
 
+    # FOV处理
+    p.add_argument("--apply_fov_mask", action='store_true', default=False, 
+                   help="Apply FOV (Field of View) mask to remove black border regions")
+
     # 验证和保存
     p.add_argument("--val_interval", type=int, default=1, help="Validation interval (epochs)")
     p.add_argument("--save_interval", type=int, default=5, help="Checkpoint save interval (epochs)")
@@ -149,6 +153,14 @@ def parse_args():
     p.add_argument("--temperature", type=float, default=4.0)
     p.add_argument("--alpha", type=float, default=0.7,
                     help="总损失: alpha*CE + (1-alpha)*KD")
+    
+    # KD Evidence Package System
+    p.add_argument("--generate_evidence_package", action='store_true',
+                   help="Generate comprehensive KD evidence package after training")
+    p.add_argument("--evidence_samples", type=int, default=500,
+                   help="Number of samples for evidence package evaluation")
+    p.add_argument("--evidence_experiment_name", type=str, default=None,
+                   help="Experiment name for evidence package (auto-detected if None)")
 
     return p.parse_args()
 
@@ -251,6 +263,7 @@ def get_parser_default(param_name):
         'save_interval': 1,         # Save checkpoint every x epochs
         'flip_prob': 0.5,
         'rotation_degree': 15,
+        'apply_fov_mask': False,
         # 添加模型相关默认值
         'model': 'unet_min',
         # 添加蒸馏相关默认值
@@ -505,6 +518,135 @@ def validate(model, loader, criterion, device, args):
         )
 
 # Main function
+def generate_kd_evidence_package(args, teacher_model, student_model, val_loader, output_mgr, device):
+    """
+    Generate comprehensive KD evidence package for analysis
+    
+    This function creates the unified evidence package that proves KD effectiveness:
+    1. Full metrics evaluation (standard + calibration + boundary)
+    2. Unified CSV export for comparison tables
+    3. KD-specific visualizations (teacher-student analysis, reliability diagrams)
+    4. Four-panel KD analysis for presentation
+    """
+    print("\n" + "="*60)
+    print("🔬 GENERATING KD EVIDENCE PACKAGE")
+    print("="*60)
+    
+    # Determine experiment type from config or model names
+    experiment_name = args.evidence_experiment_name
+    if experiment_name is None:
+        if hasattr(args, 'teacher_model') and hasattr(args, 'student_model'):
+            experiment_name = f"KD_{args.teacher_model}_to_{args.student_model}"
+        else:
+            experiment_name = "KD_Experiment"
+    
+    # Initialize components
+    evaluator = Evaluator(device=device)
+    distill_visualizer = DistillationVisualizer(output_mgr.get_viz_dir(), device)
+    visualizer = Visualizer()
+    
+    print(f"📊 Experiment: {experiment_name}")
+    print(f"📁 Output Directory: {output_mgr.get_run_dir()}")
+    
+    # Step 1: Full metrics evaluation for both models
+    print("\n🔍 Step 1: Comprehensive Metrics Evaluation")
+    print("-" * 40)
+    
+    # Teacher evaluation
+    print("   📚 Evaluating Teacher Model...")
+    teacher_metrics = evaluator.evaluate_with_full_metrics(
+        teacher_model, val_loader, 
+        num_classes=args.num_classes,
+        binary_mode=args.binary,
+        max_samples=args.evidence_samples
+    )
+    print(f"      ✅ Teacher - IoU: {teacher_metrics.get('iou', teacher_metrics.get('miou', 0)):.4f}")
+    
+    # Student evaluation  
+    print("   🎓 Evaluating Student Model...")
+    student_metrics = evaluator.evaluate_with_full_metrics(
+        student_model, val_loader,
+        num_classes=args.num_classes, 
+        binary_mode=args.binary,
+        max_samples=args.evidence_samples
+    )
+    print(f"      ✅ Student - IoU: {student_metrics.get('iou', student_metrics.get('miou', 0)):.4f}")
+    
+    # Step 2: Generate unified evidence package
+    print("\n📦 Step 2: Generating Unified Evidence Package")
+    print("-" * 40)
+    
+    evidence_data = {
+        'teacher_metrics': teacher_metrics,
+        'student_metrics': student_metrics,
+        'experiment_name': experiment_name,
+        'training_config': {
+            'teacher_model': args.teacher_model if hasattr(args, 'teacher_model') else 'Unknown',
+            'student_model': args.student_model if hasattr(args, 'student_model') else 'Unknown', 
+            'epochs': args.epochs,
+            'batch_size': args.batch_size,
+            'distill_temperature': getattr(args, 'distill_temperature', args.temperature),
+            'distill_alpha': getattr(args, 'distill_alpha', args.alpha)
+        }
+    }
+    
+    # Generate evidence package with distillation visualizer (unified format)
+    package_paths = distill_visualizer.generate_unified_kd_evidence_package(
+        evidence_data, save_prefix=f"{experiment_name}_evidence"
+    )
+    
+    print(f"   ✅ CSV Summary: {os.path.basename(package_paths['csv_path'])}")
+    print(f"   ✅ Performance Plot: {os.path.basename(package_paths['performance_plot'])}")
+    print(f"   ✅ Reliability Diagrams: {os.path.basename(package_paths['reliability_diagrams'])}")
+    
+    # Step 3: Four-panel KD analysis
+    print("\n📈 Step 3: Four-Panel KD Analysis")
+    print("-" * 40)
+    
+    try:
+        four_panel_path = distill_visualizer.create_kd_four_panel_analysis(
+            teacher_model, student_model, val_loader,
+            temperature=getattr(args, 'distill_temperature', args.temperature),
+            max_samples=min(200, args.evidence_samples),  # Limit for memory
+            save_name=f"{experiment_name}_four_panel_analysis.png"
+        )
+        print(f"   ✅ Four-Panel Analysis: {os.path.basename(four_panel_path)}")
+    except Exception as e:
+        print(f"   ⚠️  Four-Panel Analysis failed: {str(e)}")
+    
+    # Step 4: Additional KD-specific analyses
+    print("\n🔬 Step 4: KD-Specific Analysis")
+    print("-" * 40)
+    
+    try:
+        # Teacher-Student comparison
+        comparison_path = distill_visualizer.visualize_prediction_comparison(
+            teacher_model, student_model, val_loader,
+            num_samples=min(6, args.evidence_samples // 100),
+            save_name=f"{experiment_name}_prediction_comparison.png"
+        )
+        print(f"   ✅ Prediction Comparison: {os.path.basename(comparison_path)}")
+        
+        # Knowledge transfer analysis
+        kd_stats = distill_visualizer.visualize_knowledge_transfer(
+            teacher_model, student_model, val_loader,
+            temperature=getattr(args, 'distill_temperature', args.temperature),
+            max_samples=min(500, args.evidence_samples),
+            save_name=f"{experiment_name}_knowledge_transfer.png"
+        )
+        print(f"   ✅ Knowledge Transfer Analysis: Generated")
+        
+    except Exception as e:
+        print(f"   ⚠️  Additional analysis failed: {str(e)}")
+    
+    print("\n" + "="*60)
+    print("✅ KD EVIDENCE PACKAGE GENERATION COMPLETE")
+    print(f"📁 All files saved in: {output_mgr.get_viz_dir()}")
+    print("="*60)
+    
+    return package_paths
+
+
 def main():
     args = parse_args()
 
@@ -516,7 +658,7 @@ def main():
     # Binary/Multiclass 强一致性保护：自动修正 num_classes
     if args.binary:
         if args.num_classes != 2:
-            print(f"⚠️ binary=True 但 num_classes={args.num_classes} != 2，自动将 num_classes 置为 2")
+            print(f"[WARN] binary=True 但 num_classes={args.num_classes} != 2，自动将 num_classes 置为 2")
             args.num_classes = 2
 
     # Print save strategy description
@@ -571,7 +713,8 @@ def main():
         # "custom_mapping": custom_mapping,
         # "target_classes": args.target_classes,
         "class_id_map": class_id_map,  # 直接传入最终映射
-        "return_multiclass": is_multiclass # 保持兼容性
+        "return_multiclass": is_multiclass, # 保持兼容性
+        "apply_fov_mask": args.apply_fov_mask  # FOV mask处理
     }
 
     full_dataset = SegDatasetMin(
@@ -616,7 +759,7 @@ def main():
     
     if len(valid_counter) == 0:
         raise ValueError(
-            "❌ 所有样本的标签都只有 255（ignore），请检查 class_id_map / 映射流程。\n"
+            "[FAILED] 所有样本的标签都只有 255（ignore），请检查 class_id_map / 映射流程。\n"
             "可能原因：\n"
             "  1. class_id_map 映射错误，所有原始标签都被映射为255\n"
             "  2. 数据集路径错误或标签文件损坏\n"
@@ -625,12 +768,12 @@ def main():
     else:
         valid_classes = sorted(valid_counter.keys())
         total_valid_pixels = sum(valid_counter.values())
-        print(f"✅ [HEALTH CHECK] 发现有效标签: {valid_classes}")
-        print(f"✅ [HEALTH CHECK] 标签分布: {dict(valid_counter)} (共 {total_valid_pixels:,} 个有效像素)")
+        print(f"[PASS] [HEALTH CHECK] 发现有效标签: {valid_classes}")
+        print(f"[PASS] [HEALTH CHECK] 标签分布: {dict(valid_counter)} (共 {total_valid_pixels:,} 个有效像素)")
         
         # 额外检查：确保有效类别数与预期匹配
         if not args.binary and len(valid_classes) > args.num_classes:
-            print(f"⚠️ [HEALTH CHECK] Warning: 发现 {len(valid_classes)} 个有效类别，但 num_classes={args.num_classes}")
+            print(f"[WARN] [HEALTH CHECK] Warning: 发现 {len(valid_classes)} 个有效类别，但 num_classes={args.num_classes}")
 
     # split ratio
     val_ratio  = args.val_ratio
@@ -700,7 +843,7 @@ def main():
                 
                 # 验证加载结果
                 loaded_params = sum(p.numel() for p in teacher_model.parameters())
-                print(f"✅ Teacher model weights loaded successfully")
+                print(f"[PASS] Teacher model weights loaded successfully")
                 print(f"[TEACHER] Total parameters: {loaded_params:,}")
                 
                 # 冻结Teacher模型参数
@@ -726,24 +869,24 @@ def main():
                     
                     # 检查输出是否有意义（不是全零或全NaN）
                     if torch.all(test_output == 0):
-                        print(f"⚠️ [TEACHER] WARNING: Model outputs all zeros!")
+                        print(f"[WARN] [TEACHER] WARNING: Model outputs all zeros!")
                     elif torch.isnan(test_output).any():
-                        print(f"⚠️ [TEACHER] WARNING: Model outputs contain NaN!")
+                        print(f"[WARN] [TEACHER] WARNING: Model outputs contain NaN!")
                     else:
-                        print(f"✅ [TEACHER] Model output appears normal")
+                        print(f"[PASS] [TEACHER] Model output appears normal")
                     
             except Exception as e:
-                print(f"❌ Error loading Teacher weights: {e}")
-                print("⚠️ Continuing with randomly initialized Teacher model")
-                print("⚠️ This will result in poor distillation performance")
+                print(f"[FAILED] Error loading Teacher weights: {e}")
+                print("[WARN] Continuing with randomly initialized Teacher model")
+                print("[WARN] This will result in poor distillation performance")
                 
                 # 即使加载失败，也要冻结Teacher
                 for param in teacher_model.parameters():
                     param.requires_grad = False
                 teacher_model.eval()
         else:
-            print("⚠️ No Teacher checkpoint provided - using randomly initialized Teacher model")
-            print("⚠️ This will result in poor distillation performance")
+            print("[WARN] No Teacher checkpoint provided - using randomly initialized Teacher model")
+            print("[WARN] This will result in poor distillation performance")
             # 冻结随机初始化的Teacher
             for param in teacher_model.parameters():
                 param.requires_grad = False
@@ -980,7 +1123,7 @@ def main():
                 save_name="distillation_metrics.csv"
             )
             
-            print(f"✅ 蒸馏分析完成！所有结果保存在: {viz_dir}/distillation_analysis/")
+            print(f"[PASS] 蒸馏分析完成！所有结果保存在: {viz_dir}/distillation_analysis/")
 
     # Final model saving (using the last epoch's metrics)
     if 'val_metrics' in locals():
@@ -998,6 +1141,26 @@ def main():
     summary = output_mgr.get_run_summary()
     print(f"\n--> Train Completed <--")
     print(f"Results saved to: {summary['run_dir']}")
+    
+    # KD Evidence Package Generation (if enabled)
+    if args.generate_evidence_package and args.enable_distillation and DISTILLATION_AVAILABLE:
+        print("\n🔬 Generating KD Evidence Package...")
+        try:
+            evidence_paths = generate_kd_evidence_package(
+                args, teacher_model, student_model, val_loader, output_mgr, device
+            )
+            print(f"✅ Evidence package generated successfully!")
+            print(f"📊 Key outputs:")
+            print(f"   - Metrics CSV: {os.path.basename(evidence_paths['csv_path'])}")
+            print(f"   - Performance Analysis: {os.path.basename(evidence_paths['performance_plot'])}")
+            print(f"   - Reliability Diagrams: {os.path.basename(evidence_paths['reliability_diagrams'])}")
+        except Exception as e:
+            print(f"⚠️  Evidence package generation failed: {str(e)}")
+            print("   Training completed successfully, but evidence package could not be generated.")
+    elif args.generate_evidence_package and not args.enable_distillation:
+        print("⚠️  Evidence package requested but distillation not enabled. Skipping evidence generation.")
+    elif args.generate_evidence_package and not DISTILLATION_AVAILABLE:
+        print("⚠️  Evidence package requested but distillation modules not available. Skipping evidence generation.")
     
     # 保存指标曲线图
     if 'monitor' in locals():

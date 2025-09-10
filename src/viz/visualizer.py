@@ -547,21 +547,6 @@ class Visualizer:
         
         return best_threshold
     
-
-    # 预留扩展接口
-    def auto_format_inputs(self, images, masks, predictions):
-        """自动格式化输入数据为标准格式"""
-        # TODO: 自动检测和转换维度格式
-        # TODO: 统一数据类型和数值范围
-
-    def create_multiclass_overlay(self, image, pred_mask, gt_mask=None, num_classes=2):
-        """支持多类别的覆盖图生成"""
-        # TODO: 根据类别数生成不同颜色映射
-    
-    def create_multi_panel(self, image, gt_mask, pred_mask, **kwargs):
-        """预留接口：创建多面板对比图"""
-        # TODO: 未来实现四面板或更复杂的可视化
-        pass
     
     def plot_metrics_curves(self, metrics_history, save_path):
         """绘制训练过程中的指标曲线"""
@@ -631,7 +616,152 @@ class Visualizer:
         plt.close()
         print(f"Metrics curves saved to: {save_path}")
 
-    def create_error_analysis(self, predictions, targets, save_dir):
-        """预留接口：错误分析可视化"""
-        # TODO: 未来实现错误案例分析
-        pass
+    def generate_kd_evidence_package(
+        self, metrics_dict, regime_name, output_manager,
+        model_params=None, fps=None, training_time=None,
+        teacher_name=None, student_name=None, epochs=None
+    ):
+        print(f"Generating KD evidence package for {regime_name}...")
+
+        # 1. 导出CSV对比数据
+        csv_path = output_manager.get_kd_comparison_csv_path()
+        csv_data = self.export_kd_comparison_csv(
+            metrics_dict=metrics_dict,
+            regime_name=regime_name,
+            teacher_model_name=teacher_name,
+            student_model_name=student_name,
+            epochs=epochs,
+            training_time=training_time,
+            model_params=model_params,
+            fps=fps,
+            notes=metrics_dict.get('experiment_notes', ''),
+            save_path=csv_path
+        )
+
+        # 2. 生成可靠性图（如果还没生成）
+        reliability_path = output_manager.get_reliability_diagram_path(regime_name)
+        if not os.path.exists(reliability_path) and 'reliability_stats' not in metrics_dict:
+            print(f"Reliability diagram not found, skipping for {regime_name}")
+
+        # 3. 生成性能总结报告
+        summary_path = os.path.join(output_manager.get_calibration_analysis_dir(), 
+                                   f"performance_summary_{regime_name}.png")
+        self.create_performance_summary_plot(metrics_dict, summary_path, regime_name)
+
+        # 4. 返回证据包路径
+        evidence_package = {
+            'regime': regime_name,
+            'csv_data': csv_data,
+            'reliability_diagram': reliability_path if os.path.exists(reliability_path) else None,
+            'performance_summary': summary_path,
+            'metrics': metrics_dict
+        }
+        
+        print(f"KD evidence package completed for {regime_name}")
+        return evidence_package
+    
+    def export_kd_comparison_csv(
+        self, metrics_dict, regime_name, teacher_model_name=None,
+        student_model_name=None, epochs=None, training_time=None,
+        model_params=None, fps=None, notes="", save_path=None
+    ):
+        # 重用evaluator中的逻辑
+        from src.eval.evaluator import Evaluator
+        evaluator = Evaluator()
+        return evaluator.export_kd_comparison_csv(
+            metrics_dict, regime_name, teacher_model_name, student_model_name,
+            epochs, training_time, model_params, fps, notes, save_path
+        )
+    
+    def create_performance_summary_plot(self, metrics_dict, save_path, regime_name):
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle(f'Performance Summary - {regime_name}', fontsize=16, fontweight='bold')
+
+        # 1. 主要性能指标柱状图
+        ax1 = axes[0, 0]
+        metrics_names = ['mIoU', 'Dice', 'Boundary-F1']
+        metrics_values = [
+            metrics_dict.get('miou', metrics_dict.get('iou', 0)),
+            metrics_dict.get('mdice', metrics_dict.get('dice', 0)),
+            metrics_dict.get('boundary_f1', 0)
+        ]
+
+        bars = ax1.bar(metrics_names, metrics_values, 
+                       color=['skyblue', 'lightgreen', 'lightcoral'], alpha=0.8)
+        ax1.set_title('Performance Metrics')
+        ax1.set_ylabel('Score')
+        ax1.set_ylim([0, 1])
+
+        # 在柱状图上添加数值标签
+        for bar, value in zip(bars, metrics_values):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                    f'{value:.3f}', ha='center', va='bottom')
+            
+        # 2. 校准指标
+        ax2 = axes[0, 1]
+        cal_names = ['ECE', 'NLL']
+        cal_values = [metrics_dict.get('ece', 0), metrics_dict.get('nll', 0)]
+
+        bars2 = ax2.bar(cal_names, cal_values,
+                       color=['orange', 'red'], alpha=0.8)
+        ax2.set_title('Calibration Metrics (Lower is Better)')
+        ax2.set_ylabel('Score')
+
+        for bar, value in zip(bars2, cal_values):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                    f'{value:.4f}', ha='center', va='bottom')
+            
+        # 3. 指标对比雷达图（如果有多个指标）
+        ax3 = axes[1, 0]
+        categories = ['mIoU', 'Dice', 'Boundary-F1', 'Calibration']
+        values = [
+            metrics_dict.get('miou', metrics_dict.get('iou', 0)),
+            metrics_dict.get('mdice', metrics_dict.get('dice', 0)),
+            metrics_dict.get('boundary_f1', 0),
+            1 - metrics_dict.get('ece', 0)  # 转换ECE为正向指标
+        ]
+
+        # 简化的雷达图显示
+        angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False)
+        values_plot = np.concatenate((values, [values[0]]))  # 闭合
+        angles_plot = np.concatenate((angles, [angles[0]]))
+
+        ax3 = plt.subplot(2, 2, 3, projection='polar')
+        ax3.plot(angles_plot, values_plot, 'o-', linewidth=2, label=regime_name)
+        ax3.fill(angles_plot, values_plot, alpha=0.25)
+        ax3.set_xticks(angles)
+        ax3.set_xticklabels(categories)
+        ax3.set_ylim(0, 1)
+        ax3.set_title('Performance Radar', y=1.08)
+        # 4. 关键统计信息
+        ax4 = axes[1, 1]
+        ax4.axis('off')
+        
+        stats_text = f"""
+            {regime_name} Summary:
+
+            Performance:
+            • mIoU: {metrics_dict.get('miou', metrics_dict.get('iou', 0)):.3f}
+            • Dice: {metrics_dict.get('mdice', metrics_dict.get('dice', 0)):.3f}
+            • Boundary-F1: {metrics_dict.get('boundary_f1', 0):.3f}
+
+            Calibration:
+            • ECE: {metrics_dict.get('ece', 0):.4f}
+            • NLL: {metrics_dict.get('nll', 0):.4f}
+
+            Task Type: {metrics_dict.get('task_type', 'Unknown')}
+            Classes: {metrics_dict.get('num_classes', 'Unknown')}
+        """
+
+        ax4.text(0.1, 0.5, stats_text, transform=ax4.transAxes, 
+                fontsize=11, verticalalignment='center',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"Performance summary saved to: {save_path}")
+        return save_path

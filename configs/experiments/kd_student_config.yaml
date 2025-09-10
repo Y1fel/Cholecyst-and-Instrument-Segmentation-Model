@@ -1,0 +1,67 @@
+# KD-Student: 知识蒸馏训练实验
+# 20 epochs, Teacher(unet_plus_plus) -> Student(adaptive_unet)
+
+# === 基础训练配置 ===
+epochs: 20
+batch_size: 4
+lr: 0.0001
+img_size: 256
+num_workers: 0
+num_classes: 3
+
+# === 数据配置 ===
+split: "train"
+binary: false
+val_ratio: 0.2
+monitor_interval: 10
+
+# === 分类配置 ===
+classification_scheme: "3class_org"
+
+# === 知识蒸馏配置 ===
+enable_distillation: true  # 关键：启用KD
+teacher_model: "unet_plus_plus"
+student_model: "adaptive_unet"
+teacher_checkpoint: "outputs/unet_plus_plus_20250906_033807/checkpoints/unet_plus_plus_best.pth"
+
+# 蒸馏超参数
+distill_temperature: 4.0
+distill_alpha: 0.7
+distill_beta: 0.3
+distill_feature_weight: 0.1
+
+# === 模型配置 ===
+model: "adaptive_unet"  # 实际训练的是Student模型
+
+# === 训练策略 ===
+stage: "offline"
+optimizer: "adamw"
+weight_decay: 0.0001
+scheduler: "cosine"
+
+# === 数据增强 ===
+augment: true
+flip_prob: 0.5
+rotation_degree: 10
+
+# === FOV处理 ===
+apply_fov_mask: false  # 是否应用视野遮罩去除黑边
+
+# === 监控和可视化 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 6
+
+# === 保存策略 ===
+save_interval: 5
+val_interval: 1
+save_best_only: true
+
+# === Evidence Package System ===
+generate_evidence_package: true
+evidence_samples: 1000
+evidence_experiment_name: "KD_Student"
+
+# === 实验标识 ===
+experiment_regime: "KD-Student"
+experiment_notes: "T=4/5, λ_kd=0.55"

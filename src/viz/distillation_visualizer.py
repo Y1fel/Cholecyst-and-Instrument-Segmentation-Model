@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
@@ -442,3 +443,250 @@ Final mIoU: {metrics_history.get('miou', [0])[-1]:.4f}
         print(f"Distillation summary stats saved to: {summary_path}")
         
         return save_path, summary_path
+    
+    def generate_unified_kd_evidence_package(self, teacher_model, student_model, val_loader,
+            metrics_dict, output_manager, regime_name="KD-Student",
+            model_params=None, fps=None, training_time=None,
+            epochs=None, distillation_stats=None
+        ):
+        """
+        生成统一的KD证据包 - 包含所有标准指标 + KD专用分析
+        确保与标准可视化器输出格式一致
+        """
+        print(f"Generating unified KD evidence package for {regime_name}...")
+        
+        # 1. 生成标准证据包（与标准可视化器格式一致）
+        from src.viz.visualizer import Visualizer
+        standard_viz = Visualizer()
+        
+        # 重用标准可视化器的证据包生成逻辑
+        evidence_package = standard_viz.generate_kd_evidence_package(
+            metrics_dict=metrics_dict,
+            regime_name=regime_name,
+            output_manager=output_manager,
+            model_params=model_params,
+            fps=fps,
+            training_time=training_time,
+            teacher_name="UNet++",
+            student_name="Adaptive UNet",
+            epochs=epochs
+        )
+        
+        # 2. 添加KD专用分析
+        kd_analysis_dir = os.path.join(output_manager.get_kd_experiment_dir(), "kd_analysis")
+        os.makedirs(kd_analysis_dir, exist_ok=True)
+        
+        # 生成Teacher-Student对比
+        teacher_student_path = os.path.join(kd_analysis_dir, f"teacher_student_comparison_{regime_name}.png")
+        self.visualize_prediction_comparison(
+            teacher_model, student_model, val_loader,
+            num_samples=6, save_name=os.path.basename(teacher_student_path)
+        )
+        
+        # 生成知识传递分析
+        if distillation_stats is None:
+            distillation_stats = self.visualize_knowledge_transfer(
+                teacher_model, student_model, val_loader,
+                save_name=f"knowledge_transfer_{regime_name}.png"
+            )
+        
+        # 生成四联图
+        four_panel_path = self.create_kd_four_panel_analysis(
+            teacher_model, student_model, val_loader, regime_name, kd_analysis_dir
+        )
+        
+        # 3. 更新证据包，添加KD专用内容
+        evidence_package.update({
+            'kd_analysis': {
+                'teacher_student_comparison': teacher_student_path,
+                'knowledge_transfer_stats': distillation_stats,
+                'four_panel_analysis': four_panel_path,
+                'kd_analysis_dir': kd_analysis_dir
+            },
+            'distillation_stats': distillation_stats
+        })
+        
+        print(f"Unified KD evidence package completed for {regime_name}")
+        return evidence_package
+    
+    def create_kd_four_panel_analysis(self, teacher_model, student_model, val_loader, 
+                                    regime_name, save_dir):
+        """
+        创建KD四联图分析：KL散度、Agreement、置信度差异、散点分布
+        """
+        print(f"Creating KD four-panel analysis for {regime_name}...")
+        
+        teacher_model.eval()
+        student_model.eval()
+        
+        # 收集数据
+        kl_divergences = []
+        agreements = []
+        confidence_diffs = []
+        teacher_confidences = []
+        student_confidences = []
+        
+        with torch.no_grad():
+            for images, _ in val_loader:
+                images = images.to(self.device)
+                
+                teacher_logits = teacher_model(images)
+                student_logits = student_model(images)
+                
+                # 计算概率
+                teacher_probs = torch.softmax(teacher_logits, dim=1)
+                student_probs = torch.softmax(student_logits, dim=1)
+                
+                # 展平处理
+                teacher_probs_flat = teacher_probs.view(-1, teacher_probs.shape[1])
+                student_probs_flat = student_probs.view(-1, student_probs.shape[1])
+                
+                # 采样减少计算量
+                sample_indices = torch.randperm(teacher_probs_flat.shape[0])[:1000]
+                teacher_sample = teacher_probs_flat[sample_indices]
+                student_sample = student_probs_flat[sample_indices]
+                
+                # 计算KL散度
+                kl_div = F.kl_div(torch.log(student_sample + 1e-8), teacher_sample, 
+                                 reduction='none').sum(dim=1)
+                kl_divergences.extend(kl_div.cpu().numpy())
+                
+                # 计算预测一致性
+                teacher_preds = torch.argmax(teacher_sample, dim=1)
+                student_preds = torch.argmax(student_sample, dim=1)
+                agreement = (teacher_preds == student_preds).float()
+                agreements.extend(agreement.cpu().numpy())
+                
+                # 计算置信度差异
+                teacher_conf = torch.max(teacher_sample, dim=1)[0]
+                student_conf = torch.max(student_sample, dim=1)[0]
+                conf_diff = torch.abs(teacher_conf - student_conf)
+                confidence_diffs.extend(conf_diff.cpu().numpy())
+                
+                teacher_confidences.extend(teacher_conf.cpu().numpy())
+                student_confidences.extend(student_conf.cpu().numpy())
+        
+        # 转换为numpy数组
+        kl_divergences = np.array(kl_divergences)
+        agreements = np.array(agreements)
+        confidence_diffs = np.array(confidence_diffs)
+        teacher_confidences = np.array(teacher_confidences)
+        student_confidences = np.array(student_confidences)
+        
+        # 创建四联图
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'Knowledge Distillation Analysis - {regime_name}', fontsize=16, fontweight='bold')
+        
+        # 1. KL散度分布
+        ax1 = axes[0, 0]
+        ax1.hist(kl_divergences, bins=50, alpha=0.7, color='blue', edgecolor='black')
+        ax1.set_title('KL Divergence Distribution')
+        ax1.set_xlabel('KL Divergence')
+        ax1.set_ylabel('Frequency')
+        ax1.axvline(np.mean(kl_divergences), color='red', linestyle='--', 
+                   label=f'Mean: {np.mean(kl_divergences):.4f}')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Agreement率分析
+        ax2 = axes[0, 1]
+        agreement_rate = np.mean(agreements)
+        ax2.bar(['Agree', 'Disagree'], [agreement_rate, 1-agreement_rate],
+                color=['green', 'red'], alpha=0.7)
+        ax2.set_title(f'Teacher-Student Agreement: {agreement_rate:.3f}')
+        ax2.set_ylabel('Proportion')
+        for i, v in enumerate([agreement_rate, 1-agreement_rate]):
+            ax2.text(i, v + 0.01, f'{v:.3f}', ha='center', va='bottom')
+        
+        # 3. 置信度差异分布
+        ax3 = axes[1, 0]
+        ax3.hist(confidence_diffs, bins=50, alpha=0.7, color='orange', edgecolor='black')
+        ax3.set_title('Confidence Difference Distribution')
+        ax3.set_xlabel('|Teacher Conf - Student Conf|')
+        ax3.set_ylabel('Frequency')
+        ax3.axvline(np.mean(confidence_diffs), color='red', linestyle='--',
+                   label=f'Mean: {np.mean(confidence_diffs):.4f}')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. KL散度 vs Agreement 散点图
+        ax4 = axes[1, 1]
+        
+        # 为了可视化，我们对数据进行分bin
+        n_bins = 20
+        kl_bins = np.linspace(0, np.percentile(kl_divergences, 95), n_bins)
+        bin_indices = np.digitize(kl_divergences, kl_bins)
+        
+        bin_centers = []
+        bin_agreements = []
+        bin_counts = []
+        
+        for i in range(1, len(kl_bins)):
+            mask = bin_indices == i
+            if np.sum(mask) > 0:
+                bin_centers.append((kl_bins[i-1] + kl_bins[i]) / 2)
+                bin_agreements.append(np.mean(agreements[mask]))
+                bin_counts.append(np.sum(mask))
+        
+        # 绘制散点图，点的大小表示样本数量
+        scatter = ax4.scatter(bin_centers, bin_agreements, 
+                            s=[c/10 for c in bin_counts], alpha=0.6, c='purple')
+        ax4.plot(bin_centers, bin_agreements, 'o-', color='purple', alpha=0.7)
+        ax4.set_title('KL Divergence vs Agreement Rate')
+        ax4.set_xlabel('KL Divergence (binned)')
+        ax4.set_ylabel('Agreement Rate')
+        ax4.grid(True, alpha=0.3)
+        
+        # 添加趋势线
+        if len(bin_centers) > 1:
+            z = np.polyfit(bin_centers, bin_agreements, 1)
+            p = np.poly1d(z)
+            ax4.plot(bin_centers, p(bin_centers), "r--", alpha=0.8, label='Trend')
+            ax4.legend()
+        
+        plt.tight_layout()
+        
+        # 保存四联图
+        four_panel_path = os.path.join(save_dir, f"kd_four_panel_analysis_{regime_name}.png")
+        plt.savefig(four_panel_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"KD four-panel analysis saved to: {four_panel_path}")
+        
+        # 返回统计信息
+        stats = {
+            'mean_kl_divergence': np.mean(kl_divergences),
+            'agreement_rate': agreement_rate,
+            'mean_confidence_diff': np.mean(confidence_diffs),
+            'kl_std': np.std(kl_divergences),
+            'conf_diff_std': np.std(confidence_diffs)
+        }
+        
+        return four_panel_path, stats
+    
+    def export_kd_metrics_comparison(self, metrics_dict, distillation_stats, 
+                                   regime_name, output_manager, **kwargs):
+        """
+        导出KD模式的指标对比 - 格式与标准模式一致
+        """
+        # 合并标准指标和KD专用指标
+        enhanced_metrics = {
+            **metrics_dict,
+            'kd_mean_divergence': distillation_stats.get('mean_kl_divergence', 0),
+            'kd_agreement_rate': distillation_stats.get('agreement_rate', 0),
+            'kd_confidence_diff': distillation_stats.get('mean_confidence_diff', 0)
+        }
+        
+        # 重用evaluator的CSV导出功能
+        from src.eval.evaluator import Evaluator
+        evaluator = Evaluator()
+        
+        csv_path = output_manager.get_kd_comparison_csv_path()
+        return evaluator.export_kd_comparison_csv(
+            metrics_dict=enhanced_metrics,
+            regime_name=regime_name,
+            teacher_model_name="UNet++",
+            student_model_name="Adaptive UNet",
+            save_path=csv_path,
+            **kwargs
+        )

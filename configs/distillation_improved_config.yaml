@@ -1,5 +1,13 @@
 # /configs/distillation_improved_config.yaml
-# 改进的知识蒸馏配置文件
+# === 数据增强 ===
+augment: true
+flip_prob: 0.5
+rotation_degree: 15
+
+# === FOV处理 ===
+apply_fov_mask: false  # 是否应用视野遮罩去除黑边
+
+# === 监控和可视化 ===识蒸馏配置文件
 # 修复了Teacher权重加载和类别映射问题
 
 # === 基础配置 ===

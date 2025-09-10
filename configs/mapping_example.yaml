@@ -1,0 +1,33 @@
+ws_to_train:
+  # 常见边框/无效
+  0: 0
+  255: 0   # 自检用：把外圈也当背景更直观（训练时你也可设 255:255）
+
+  # —— 两位数“别名”（你的库里实际出现）——
+  11: 0        # abdominal_wall -> background
+  12: 0        # fat -> background
+  13: 0        # gastrointestinal_tract -> background
+  21: 0        # liver -> background
+  22: 2        # gallbladder -> target_organ   ★关键
+  23: 0        # connective_tissue -> background
+  24: 0        # blood -> background
+  25: 0        # cystic_duct -> background
+  31: 1        # grasper -> instrument
+  32: 1        # l_hook -> instrument
+  50: 1        # l_hook (官方灰度) -> instrument
+
+  # —— 官方灰度（以防个别文件是官方值）——
+  80: 0        # background
+  17: 0        # abdominal_wall
+  33: 0        # liver
+  19: 0        # gastrointestinal_tract
+  18: 0        # fat
+  49: 1        # grasper
+  35: 0        # connective_tissue
+  36: 0        # blood
+  37: 0        # cystic_duct
+  34: 2        # gallbladder
+  51: 0        # hepatic_vein
+  5:  0        # liver_ligament
+
+default_for_others: 0

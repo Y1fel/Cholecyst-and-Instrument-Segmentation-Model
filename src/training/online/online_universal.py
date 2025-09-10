@@ -172,6 +172,10 @@ def parse_args():
     p.add_argument("--model_type", type=str, default=None,
                    help="若不指定，将自动使用 --model 的值。")
 
+    # FOV处理
+    p.add_argument("--apply_fov_mask", action='store_true', default=False, 
+                   help="Apply FOV (Field of View) mask to remove black border regions")
+
     # 离线模型参数
     p.add_argument("--offline_model_path", type=str, help="Path to the offline model checkpoint")
     p.add_argument("--offline_model_name", type=str, help="Model name for the offline model")
@@ -449,7 +453,12 @@ def main():
 
     # 加载数据集
     # 注意：在线学习通常使用流式数据，这里使用数据集作为示例
-    dataset = SegDatasetMin(args.data_root, dtype=args.split, img_size=args.img_size)
+    dataset = SegDatasetMin(
+        args.data_root, 
+        dtype=args.split, 
+        img_size=args.img_size,
+        apply_fov_mask=args.apply_fov_mask
+    )
     data_loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -459,7 +468,12 @@ def main():
     )
 
     # 创建验证集用于评估和可视化
-    val_dataset = SegDatasetMin(args.data_root, dtype="val", img_size=args.img_size)
+    val_dataset = SegDatasetMin(
+        args.data_root, 
+        dtype="val", 
+        img_size=args.img_size,
+        apply_fov_mask=args.apply_fov_mask
+    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
