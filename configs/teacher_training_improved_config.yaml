@@ -36,6 +36,9 @@ augment: true
 flip_prob: 0.6
 rotation_degree: 25
 
+# === FOV处理 ===
+apply_fov_mask: false  # 是否应用视野遮罩去除黑边
+
 # === 监控和可视化 ===
 enable_gpu_monitor: true
 save_viz: true
