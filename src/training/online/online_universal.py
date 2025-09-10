@@ -37,7 +37,7 @@ from src.eval.evaluator import Evaluator
 from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 from src.common.train_monitor import TrainMonitor
-from src.common.pseudo_label_quality import quality_filter
+from src.common.pseudo_label_quality import quality_filter, denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
 
 # 模型导入
 from src.models.model_zoo import build_model
@@ -282,15 +282,15 @@ class OnlineLearner:
         self.metrics_history = []
 
         self.buffer = ExperienceReplayBuffer(capacity=args.replay_capacity) if args.use_replay_buffer else None
-
         # ---- NEW: global step & best model tracking ----
         self.global_step = 0
         self.best_loss = float('inf')
         try:
             self.best_model_path = os.path.join(self.output_mgr.get_run_dir(), "student_best.pth")
         except Exception:
-            # fallback
             self.best_model_path = os.path.join(project_root, "student_best.pth")
+        # === 新增EMA安全管理器 ===
+        self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0, cooldown_period=5)
 
     def _save_best_model_if_improved(self, loss_val):
         if loss_val < self.best_loss:
@@ -387,9 +387,16 @@ class OnlineLearner:
                 pass
             torch.cuda.empty_cache()
 
-            # 伪标签质控
+            # === 新增伪标签质控（更细致） ===
             try:
-                mask_ok = quality_filter(teacher_probs, pseudo_labels_np)
+                pseudo_labels_np = denoise_pseudo_label(
+                    pseudo_labels_np[np.newaxis, ...] if pseudo_labels_np.ndim==2 else pseudo_labels_np,
+                    min_area=100, morph_op='open', morph_structure=np.ones((3,3))
+                )
+                if pseudo_labels_np.shape[0] == 1:
+                    pseudo_labels_np = pseudo_labels_np[0]
+                pixel_masks = pixel_gate_mask(teacher_probs, pseudo_labels_np)
+                mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs, pseudo_labels_np, pixel_masks)
             except Exception:
                 mask_ok = np.ones(len(pseudo_labels_np), dtype=bool)
 
@@ -457,7 +464,12 @@ class OnlineLearner:
                 scaler.scale(loss_tensor).backward()
                 scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                scaler.step(self.optimizer)
+                # === EMA安全机制 ===
+                skip_update = self.ema_safety.step(loss_tensor.item(), self.model)
+                if skip_update:
+                    print(f"[Step {self.global_step}] EMA/异常/冷却机制触发，跳过参数更新。")
+                else:
+                    scaler.step(self.optimizer)
                 scaler.update()
             else:
                 outputs = self.model(selected_imgs_train)
@@ -467,7 +479,12 @@ class OnlineLearner:
                     loss_tensor = self.criterion(outputs, pseudo_targets.long())
                 loss_tensor.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
+                # === EMA安全机制 ===
+                skip_update = self.ema_safety.step(loss_tensor.item(), self.model)
+                if skip_update:
+                    print(f"[Step {self.global_step}] EMA/异常/冷却机制触发，跳过参数更新。")
+                else:
+                    self.optimizer.step()
 
             self.loss_history.append(float(loss_tensor.item()))
 
