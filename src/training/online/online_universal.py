@@ -38,6 +38,7 @@ from src.viz.visualizer import Visualizer
 from src.common.output_manager import OutputManager
 from src.common.train_monitor import TrainMonitor
 from src.common.pseudo_label_quality import quality_filter, denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
+from src.common.ema_safety import EMASafetyManager
 
 # 模型导入
 from src.models.model_zoo import build_model
