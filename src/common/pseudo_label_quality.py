@@ -111,3 +111,31 @@ def mask_quality_filter_with_pixel_mask(prob_matrix, pseudo_labels, pixel_masks,
     pixel_mask_mask = pixel_pass_ratio > pixel_mask_thresh
     final_mask = conf_mask & pixel_mask_mask
     return final_mask
+
+
+def pixel_gate_mask(prob_matrix, pseudo_labels, conf_thresh=0.8):
+    """
+    生成像素级门控掩码，基于置信度阈值过滤不可靠的像素预测
+
+    参数:
+        prob_matrix: 概率矩阵，形状为 [N, C, H, W] 或 [N, H, W]
+        pseudo_labels: 伪标签，形状为 [N, H, W]
+        conf_thresh: 置信度阈值，默认0.8
+
+    返回:
+        pixel_mask: 布尔掩码，形状为 [N, H, W]，True表示该像素可靠
+    """
+    # 处理二分类和多分类情况
+    if prob_matrix.ndim == 4:  # [N, C, H, W] 多分类
+        # 获取每个像素的最大概率值
+        max_probs = np.max(prob_matrix, axis=1)
+        # 获取预测类别
+        pred_classes = np.argmax(prob_matrix, axis=1)
+    else:  # [N, H, W] 二分类
+        max_probs = prob_matrix
+        pred_classes = (prob_matrix > 0.5).astype(np.uint8)
+
+    # 创建像素掩码：置信度高于阈值且预测类别与伪标签一致
+    pixel_mask = (max_probs > conf_thresh) & (pred_classes == pseudo_labels)
+
+    return pixel_mask
