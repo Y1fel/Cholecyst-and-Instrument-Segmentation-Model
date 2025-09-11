@@ -250,7 +250,7 @@ test_teacher_student_predictions.py
 src/viz/post_processing.py
 /src/dataio/datasets/video01/
 /src/dataio/datasets/
-run_kd_evidence_experiments.py
+# run_kd_evidence_experiments.py
 palette_anomalies.csv
 test_fov_integration.py
 docs/FOV_Integration_Summary.md
