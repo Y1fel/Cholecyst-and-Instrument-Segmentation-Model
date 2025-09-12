@@ -37,7 +37,7 @@ rotation_degree: 20     # 增加旋转角度
 # 添加更多数据增强选项
 
 # === FOV处理 ===
-apply_fov_mask: false  # 是否应用视野遮罩去除黑边
+apply_fov_mask: true  # 是否应用视野遮罩去除黑边
 
 # === 监控和可视化 ===
 enable_gpu_monitor: true
