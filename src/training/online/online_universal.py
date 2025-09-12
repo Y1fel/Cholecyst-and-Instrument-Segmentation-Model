@@ -3,6 +3,8 @@
 合并版：保留 student-teacher 增强（AMP、best save 等），并恢复 origin 中的 adapt_step / evaluate / frame-selector /
 experience-replay / 定期评估与可视化逻辑。
 """
+import math
+import torch.nn.functional as F
 import glob
 import cv2
 import argparse
@@ -99,7 +101,137 @@ def parse_args():
 
     return p.parse_args()
 
+@torch.no_grad()
+def compute_val_metrics(model, data_iter, criterion, device, num_classes=3, binary=False):
+    """
+    简单、健壮的验证函数（替代外部 Evaluator 的 evaluate）：
+    - data_iter: iterable that yields (images, labels) where images: [B, C, H, W], labels shaped according to `binary`
+    - returns dict: {"val_loss": float, "iou": float}
+    """
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    total_iou = 0.0
 
+    for images, labels in data_iter:
+        # ensure tensors
+        images = images.to(device)
+        if labels is not None:
+            labels = labels.to(device)
+
+        # forward
+        logits = model(images)  # [N, C, H, W] or [N,1,H,W]
+        # loss (make sure labels dtype matches criterion)
+        if binary:
+            # BCEWithLogitsLoss expects float targets [N,1,H,W]
+            if labels.ndim == 3:
+                labels_for_loss = labels.unsqueeze(1).float()
+            else:
+                labels_for_loss = labels.float()
+        else:
+            # CrossEntropyLoss expects long targets [N, H, W]
+            if labels.ndim == 4 and labels.size(1) == 1:
+                labels_for_loss = labels.squeeze(1).long()
+            else:
+                labels_for_loss = labels.long()
+
+        loss = criterion(logits, labels_for_loss)
+        b = images.size(0)
+        total_loss += float(loss.item()) * b
+        total_samples += b
+
+        # predictions -> compute IoU
+        if binary:
+            probs = torch.sigmoid(logits)  # [N,1,H,W]
+            preds = (probs > 0.5).long().squeeze(1)  # [N,H,W]
+            gts = labels_for_loss.squeeze(1).long()   # [N,H,W]
+            # per-sample IoU for foreground (class 1)
+            inter = ((preds == 1) & (gts == 1)).sum(dim=(1,2)).float()
+            union = ((preds == 1) | (gts == 1)).sum(dim=(1,2)).float()
+            iou_per_sample = (inter / (union + 1e-6)).cpu().numpy()
+            # handle case union==0 -> define IoU = 1.0 (both empty); we clip below
+            iou_per_sample = [float(i) if not math.isnan(i) else 1.0 for i in iou_per_sample]
+            total_iou += float(sum(iou_per_sample))
+        else:
+            # multiclass
+            # logits: [N,C,H,W] -> pred: [N,H,W]
+            preds = torch.argmax(logits, dim=1)  # [N,H,W]
+            gts = labels_for_loss  # [N,H,W]
+            # compute mean IoU across classes for this batch (includes background/class 0)
+            batch_ious = []
+            for cls in range(num_classes):
+                pred_c = (preds == cls)
+                gt_c = (gts == cls)
+                inter = (pred_c & gt_c).sum(dim=(1,2)).float()
+                union = (pred_c | gt_c).sum(dim=(1,2)).float()
+                # per-sample IoU for this class
+                iou_c = inter / (union + 1e-6)
+                # treat union==0 (no gt and no pred for this class) as IoU=1.0
+                iou_c = torch.where(union == 0, torch.ones_like(iou_c), iou_c)
+                batch_ious.append(iou_c)  # list length=num_classes, each [N]
+            # stack -> [num_classes, N] -> mean over classes then over samples
+            batch_ious = torch.stack(batch_ious, dim=0)  # [C, N]
+            # mean over classes, then sum over samples
+            mean_iou_per_sample = batch_ious.mean(dim=0)  # [N]
+            total_iou += float(mean_iou_per_sample.sum().cpu().numpy())
+
+    if total_samples == 0:
+        return {"val_loss": float("nan"), "iou": float("nan")}
+
+    avg_loss = total_loss / total_samples
+    avg_iou = total_iou / total_samples
+    return {"val_loss": float(avg_loss), "iou": float(avg_iou)}
+
+
+def flatten_val_loader(val_loader, binary: bool = False):
+    """
+    把 val_loader 的输出从 [B, T, C, H, W] 展平为 [B*T, C, H, W]
+    并根据 binary 标志把 labels 转为正确的 dtype/shape:
+      - binary=True  -> labels float, shape [N,1,H,W]
+      - binary=False -> labels long,  shape [N,H,W]
+    """
+    for images, labels in val_loader:
+        # images: [B, T, C, H, W] 或 [B, C, H, W]
+        if images.ndim == 5:  # [B, T, C, H, W]
+            b, t, c, h, w = images.shape
+            images = images.view(b * t, c, h, w)
+            if labels is not None:
+                # labels 原为 [B, T, H, W] 或 [B, T, 1, H, W]（你 dataset 返回的是 [T,1,H,W]）
+                # 目标最终希望是 [B*T, H, W] (multiclass) or [B*T,1,H,W] (binary)
+                # 先 squeeze 可能存在的 channel dim
+                if labels.ndim == 4:  # [B, T, H, W] already
+                    labels = labels.view(b * t, h, w)
+                elif labels.ndim == 5:  # [B, T, 1, H, W]
+                    labels = labels.view(b * t, 1, h, w)
+                else:
+                    # 其它情况尝试展平
+                    labels = labels.view(b * t, *labels.shape[2:])
+
+        else:
+            # images is [B, C, H, W], labels maybe [B, H, W] or [B,1,H,W]
+            if labels is not None:
+                if labels.ndim == 4:  # [B, 1, H, W]
+                    labels = labels.view(labels.size(0), 1, labels.size(2), labels.size(3))
+                # else assume [B, H, W], leave as is
+
+        # 根据 binary 标志决定 labels 的 dtype/shape
+        if labels is not None:
+            if binary:
+                # BCEWithLogitsLoss: inputs float [N,1,H,W], targets float [N,1,H,W]
+                # 如果 labels 是 [N,H,W] -> unsqueeze channel dim
+                if labels.ndim == 3:  # [N, H, W]
+                    labels = labels.unsqueeze(1)  # -> [N,1,H,W]
+                # to float
+                if labels.dtype != torch.float32 and labels.dtype != torch.float:
+                    labels = labels.float()
+            else:
+                # CrossEntropyLoss: inputs [N,C,H,W], targets long [N,H,W]
+                if labels.ndim == 4 and labels.size(1) == 1:
+                    labels = labels.squeeze(1)  # [N,H,W]
+                if labels.dtype != torch.long:
+                    labels = labels.long()
+
+        yield images, labels
 # -----------------------
 # Dataset (保持 online_universal.py 的 OnlineFrameDataset)
 # -----------------------
@@ -458,11 +590,25 @@ class OnlineLearner:
             except Exception:
                 mask_ok = np.ones(len(pseudo_labels_np), dtype=bool)
 
+            # --- 修复：对齐 mask_ok 与 selected_flat_indices 的长度，避免越界 ---
+            # 确保 mask_ok 为 1D boolean 数组
+            mask_ok = np.asarray(mask_ok).astype(bool).ravel()
+            n_selected = len(selected_flat_indices)
+            n_mask = mask_ok.shape[0]
+            if n_mask != n_selected:
+                print(f"[DEBUG] QC output length mismatch: n_selected={n_selected}, n_mask={n_mask}. Trimming/padding to match.")
+            # 如果 mask 比选中帧多，截断；如果少，补 False
+            if n_mask > n_selected:
+                mask_ok = mask_ok[:n_selected]
+            elif n_mask < n_selected:
+                pad = np.zeros(n_selected - n_mask, dtype=bool)
+                mask_ok = np.concatenate([mask_ok, pad], axis=0)
+
             if not np.any(mask_ok):
                 self.global_step += 1
                 continue
 
-            kept_idx = np.where(mask_ok)[0]
+            kept_idx = np.where(mask_ok)[0].tolist()
             kept_global_flat_indices = [selected_flat_indices[i] for i in kept_idx]
 
             # 5) 准备训练数据（仅保留通过 QC 的样本）
@@ -562,7 +708,15 @@ class OnlineLearner:
                 print(f"[Step {self.global_step}] loss={self.loss_history[-1]:.6f} | buffer={len(self.buffer) if self.buffer is not None else 0}")
 
             if val_loader is not None and (self.global_step % self.args.eval_interval == 0):
-                val_metrics = self.evaluate(val_loader)
+
+                # 使用内部稳定的验证函数（不依赖外部 Evaluator 的内部实现）
+                flat_val_iterable = flatten_val_loader(val_loader, binary=self.args.binary)
+                # 注意 num_classes：优先使用 student/args 中的设置
+                num_classes = getattr(self.args, "student_num_classes", None) or getattr(self.args, "num_classes",
+                                                                                         None) or 2
+                val_metrics = compute_val_metrics(self.model, flat_val_iterable, self.criterion, device=self.device,
+                                                  num_classes=int(num_classes), binary=bool(self.args.binary))
+
                 self.metrics_history.append(val_metrics)
                 combined_metrics = {"step": self.global_step, "train_loss": float(loss_tensor.item())}
                 combined_metrics.update(val_metrics)
@@ -601,7 +755,7 @@ def main():
     monitor.start_timing()
 
     model_tag = args.model if args.model_type is None else args.model_type
-    output_mgr = OutputManager(model_type=model_tag, run_type="online")
+    output_mgr = OutputManager(model_type=model_tag)
     output_mgr.save_config(vars(args))
 
     # student 必须提供 checkpoint（保持新版要求）
