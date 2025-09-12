@@ -1,1 +1,17 @@
 python -m src.training.online.online_universal --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch
+
+# 新版（online_universal_v1(25091222).py支持调度与剂量控制的命令行示例
+# 固定步长+全模型更新（可能时间会较长）
+python -m src.training.online.online_universal_v1(25091222) --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode fixed --update_interval 5 --update_layers all
+
+# 固定步长+只更新BN层（可能预测效果不佳）
+python -m src.training.online.online_universal_v1(25091222) --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode fixed --update_interval 5 --update_layers bn
+
+# 固定步长+只更新最后4层（可能预测效果不佳）
+python -m src.training.online.online_universal_v1(25091222) --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode fixed --update_interval 5 --update_layers lastN --update_last_n 4
+
+# 触发式调度+只更新BN层
+python -m src.training.online.online_universal_v1(25091222) --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode triggered --update_layers bn
+
+# 触发式调度+只更新最后2层
+python -m src.training.online.online_universal_v1(25091222) --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode triggered --update_layers lastN --update_last_n 2

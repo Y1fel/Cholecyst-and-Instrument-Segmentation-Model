@@ -375,12 +375,63 @@ class OnlineLearner:
         use_amp = self.args.use_amp and torch.cuda.is_available() and (autocast is not None)
         scaler = GradScaler() if use_amp and GradScaler is not None else None
 
+        # --- 调度与剂量控制 ---
+        update_mode = self.args.update_mode
+        update_interval = self.args.update_interval
+        update_layers = self.args.update_layers
+        update_last_n = self.args.update_last_n
+        skip_count = 0
+        update_count = 0
+        bad_update_count = 0
+        import time
+        step_times = []
+
         for (batch_idx, (images, _)) in enumerate(train_loader):
             if self.global_step >= self.args.online_steps:
                 break
 
             images = images.to(self.device, non_blocking=True)  # (B, seq_len, C, H, W)
             batch_size, seq_len, c, h, w = images.shape
+
+            # 调度判断：是否执行本步更新
+            do_update = False
+            reason = ""
+            if update_mode == "fixed":
+                if self.global_step % update_interval == 0:
+                    do_update = True
+                    reason = f"fixed: step%{update_interval}=0"
+                else:
+                    do_update = False
+                    reason = f"fixed: step%{update_interval}!=0"
+            elif update_mode == "triggered":
+                if len(self.loss_history) < 5:
+                    do_update = True
+                    reason = "triggered: warmup (<5 steps)"
+                else:
+                    mean_loss = np.mean(self.loss_history)
+                    std_loss = np.std(self.loss_history)
+                    if len(self.loss_history) > 0 and self.loss_history[-1] > mean_loss + 2 * std_loss:
+                        do_update = True
+                        reason = f"triggered: loss({self.loss_history[-1]:.4f})>mean+2std"
+                    else:
+                        do_update = False
+                        reason = f"triggered: loss({self.loss_history[-1]:.4f})<=mean+2std"
+            else:
+                do_update = True
+                reason = "no schedule"
+
+            # 剂量控制：每步都设置可训练层
+            set_trainable_layers(self.model, mode=update_layers, last_n=update_last_n)
+
+            t0 = time.time()
+            if not do_update:
+                print(f"[Step {self.global_step}] 跳过参数更新，原因: {reason}")
+                skip_count += 1
+                self.global_step += 1
+                continue
+            else:
+                print(f"[Step {self.global_step}] 执行参数更新，原因: {reason}，剂量控制: {update_layers}")
+                update_count += 1
 
             # 1) student 无梯度预测整个 batch（保存预测用于可视化/对比）
             self.model.eval()
@@ -588,6 +639,34 @@ class OnlineLearner:
         # 结束，返回历史记录
         self.last_results = (self.loss_history, self.metrics_history)
         return self.last_results
+
+
+# -----------------------
+# 设置可训练层的工具函数
+# -----------------------
+def set_trainable_layers(model, mode="all", last_n=2):
+    """
+    根据剂量控制方式设置模型参数的 requires_grad。
+    mode: all/bn/lastN
+    last_n: 只在lastN时有效
+    """
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+    if mode == "all":
+        for param in model.parameters():
+            param.requires_grad = True
+    elif mode == "bn":
+        for m in model.modules():
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+                for p in m.parameters():
+                    p.requires_grad = True
+    elif mode == "lastN":
+        # 只更新最后N个参数组
+        params = list(model.named_parameters())
+        for name, param in params[-last_n:]:
+            param.requires_grad = True
+    else:
+        raise ValueError(f"未知的update_layers模式: {mode}")
 
 
 # -----------------------
