@@ -135,12 +135,15 @@ class OnlineFrameDataset(Dataset):
 # FrameSelector (来自 origin)
 # -----------------------
 class FrameSelector:
-    def __init__(self, threshold=0.9, adaptive=True, window_size=5):
+    def __init__(self, threshold=0.92, adaptive=True, window_size=5, freq=30):
         self.threshold = threshold
         self.adaptive = adaptive
         self.window_size = window_size
         self.last_frame = None
         self.similarity_history = deque(maxlen=10)
+        self.frame_count = 0
+        self.freq = freq  # 每freq帧判断一次
+        self.last_result = True
 
     def simplified_ssim(self, frame1, frame2, size=64):
         frame1_small = torch.nn.functional.interpolate(frame1.unsqueeze(0), size=(size, size), mode='bilinear').squeeze(0)
@@ -157,20 +160,24 @@ class FrameSelector:
         return ssim_map.mean().item()
 
     def should_process_all(self, frames):
+        self.frame_count += 1
+        if self.frame_count % self.freq != 0:
+            return self.last_result
         if self.last_frame is None:
             self.last_frame = frames[2]
             self.similarity_history.append(0.5)
+            self.last_result = True
             return True
         current_similarity = self.simplified_ssim(self.last_frame, frames[2])
         self.similarity_history.append(current_similarity)
         if self.adaptive and len(self.similarity_history) > 5:
             mean_sim = np.mean(self.similarity_history)
             std_sim = np.std(self.similarity_history)
-            adaptive_threshold = max(0.7, min(0.95, float(mean_sim - 0.5 * std_sim)))
+            adaptive_threshold = max(0.7, min(0.98, float(mean_sim - 0.5 * std_sim)))
         else:
             adaptive_threshold = float(self.threshold)
         self.last_frame = frames[2]
-        return current_similarity < adaptive_threshold
+        self.last_result = current_similarity < adaptive_threshold
 
 
 # -----------------------
@@ -496,7 +503,7 @@ class OnlineLearner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # 4) 伪标签质控（来自 origin）
+            # 4) 伪标签质控
             try:
                 pseudo_labels_np = denoise_pseudo_label(
                     pseudo_labels_np[np.newaxis, ...] if pseudo_labels_np.ndim == 2 else pseudo_labels_np,
@@ -506,10 +513,24 @@ class OnlineLearner:
                     pseudo_labels_np = pseudo_labels_np[0]
                 pixel_masks = pixel_gate_mask(teacher_probs, pseudo_labels_np)
                 mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs, pseudo_labels_np, pixel_masks)
-            except Exception:
+
+                # 简化版的质控结果显示
+                total_samples = len(mask_ok)
+                passed_samples = np.sum(mask_ok)
+                failed_samples = total_samples - passed_samples
+
+                # 打印简单结果
+                if passed_samples > 0:
+                    print(f"[Step {self.global_step}] 伪标签质控: {passed_samples}/{total_samples} 样本通过")
+                else:
+                    print(f"[Step {self.global_step}] 伪标签质控: 0/{total_samples} 样本通过 (全部未通过)")
+
+            except Exception as e:
+                print(f"[Step {self.global_step}] 质控过程中发生异常: {e}")
                 mask_ok = np.ones(len(pseudo_labels_np), dtype=bool)
 
             if not np.any(mask_ok):
+                print(f"[Step {self.global_step}] 没有样本通过质控，跳过本步更新")
                 self.global_step += 1
                 continue
 
@@ -573,7 +594,7 @@ class OnlineLearner:
                     print(f"[Step {self.global_step}] EMA/异常/冷却机制触发，跳过参数更新。")
                 else:
                     scaler.step(self.optimizer)
-                scaler.update()
+                    print(f"参数已更新 (step {self.global_step})")
             else:
                 outputs = self.model(selected_imgs_train)
                 loss_tensor = self.criterion(outputs, pseudo_targets.float() if self.args.binary else pseudo_targets.long())
@@ -585,7 +606,7 @@ class OnlineLearner:
                 else:
                     self.optimizer.step()
 
-            self.loss_history.append(float(loss_tensor.item()))
+                    print(f"参数已更新 (step {self.global_step})")
 
             # 8) push 训练样本（和 targets）进 replay buffer（来自 origin）
             if self.buffer is not None:

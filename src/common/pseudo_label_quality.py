@@ -11,7 +11,7 @@ def mean_confidence(prob_matrix):
     max_probs = np.max(prob_matrix, axis=1)
     return np.mean(max_probs, axis=(1,2))
 
-def connectivity_check(pseudo_labels, min_area=100):
+def connectivity_check(pseudo_labels, min_area=200):
     """
     检查每张图片的连通域面积是否达标
     pseudo_labels: [batch, H, W]
@@ -49,7 +49,7 @@ def boundary_smoothness(pseudo_labels, sigma=1.5, threshold=0.1):
         results.append(mean_diff < threshold)
     return np.array(results)
 
-def quality_filter(prob_matrix, pseudo_labels, conf_thresh=0.8, min_area=100, smooth_thresh=0.1):
+def quality_filter(prob_matrix, pseudo_labels, conf_thresh=0.9, min_area=200, smooth_thresh=0.05):
     """
     综合质控，返回通过质控的掩码
     """
@@ -59,7 +59,7 @@ def quality_filter(prob_matrix, pseudo_labels, conf_thresh=0.8, min_area=100, sm
     final_mask = conf_mask & conn_mask & smooth_mask
     return final_mask
 
-def denoise_pseudo_label(pseudo_labels, min_area=100, morph_op=None, morph_structure=None):
+def denoise_pseudo_label(pseudo_labels, min_area=200, morph_op=None, morph_structure=None):
     """
     对伪标签去噪：抹除小连通域，并可选做形态学开/闭运算和空洞填充
     pseudo_labels: [batch, H, W]
@@ -99,7 +99,8 @@ def denoise_pseudo_label(pseudo_labels, min_area=100, morph_op=None, morph_struc
         out[i] = new_img
     return out
 
-def mask_quality_filter_with_pixel_mask(prob_matrix, pseudo_labels, pixel_masks, conf_thresh=0.8, min_area=100, smooth_thresh=0.1, pixel_mask_thresh=0.7):
+def mask_quality_filter_with_pixel_mask(prob_matrix, pseudo_labels, pixel_masks,
+                                        conf_thresh=0.8, min_area=200, smooth_thresh=0.05, pixel_mask_thresh=0.8):
     """
     综合质控，增加像素级门控通过率判断。
     返回: final_mask, shape=[N,]，表示每帧是否通过全部质控
@@ -113,7 +114,7 @@ def mask_quality_filter_with_pixel_mask(prob_matrix, pseudo_labels, pixel_masks,
     return final_mask
 
 
-def pixel_gate_mask(prob_matrix, pseudo_labels, conf_thresh=0.8):
+def pixel_gate_mask(prob_matrix, pseudo_labels, conf_thresh=0.9):
     """
     生成像素级门控掩码，基于置信度阈值过滤不可靠的像素预测
 
