@@ -97,6 +97,14 @@ def parse_args():
     p.add_argument("--save_pred_every_batch", action='store_true', default=True)
     p.add_argument("--use_amp", action='store_true', default=False)
 
+    # 重新添加缺失的调度控制参数
+    p.add_argument("--update_mode", type=str, default="fixed",
+                   choices=["all", "fixed", "triggered"])
+    p.add_argument("--update_interval", type=int, default=5)
+    p.add_argument("--update_layers", type=str, default="bn",
+                   choices=["all", "bn", "lastN"])
+    p.add_argument("--update_last_n", type=int, default=2)
+
     return p.parse_args()
 
 
