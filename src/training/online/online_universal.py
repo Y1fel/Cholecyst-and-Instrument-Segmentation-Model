@@ -566,6 +566,13 @@ class OnlineLearner:
                     teacher_probs_soft = torch.softmax(teacher_logits, dim=1)
                     teacher_probs = teacher_probs_soft.cpu().numpy()
                     pseudo_labels_np = np.argmax(teacher_probs, axis=1)
+                    step_pseudo_dir = os.path.join(viz_dir, f"step_{self.global_step}_pseudo")
+                    os.makedirs(step_pseudo_dir, exist_ok=True)
+                    for k in range(min(len(pseudo_labels_np), 10)):  # 限制保存数量，避免太大
+                        pseudo_mask = pseudo_labels_np[k]
+                    save_path = os.path.join(step_pseudo_dir, f"pseudo_{k:03d}.png")
+                    plt.imsave(save_path, pseudo_mask, cmap="gray")
+                    print(f"[DEBUG] Saved {min(len(pseudo_labels_np), 10)} pseudo label masks to {step_pseudo_dir}")
 
             # 释放 teacher 临时 tensor
             try:
@@ -773,16 +780,16 @@ def main():
 
     def train_fn(batch_dir_path):
         batch_frames = sorted(glob.glob(os.path.join(batch_dir_path, "*.png")))
-        if len(batch_frames) < 5:
+        if len(batch_frames) < 50:
             print(f"Warning: Not enough frames in {batch_dir_path}, skipping batch")
             return
         print(f"Processing batch with {len(batch_frames)} frames: {batch_dir_path}")
 
-        dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=5)
+        dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=50)
         data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
 
         # 创建 val_loader（使用同一批次做简单验证，用于 viz / evaluate）
-        val_dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=5)
+        val_dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=50)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
         learner.run_online_learning(data_loader, val_loader)
@@ -790,12 +797,12 @@ def main():
     extractor = VideoFrameExtractor(output_dir="src/dataio/datasets")
     extractor.extract(
         video_path=args.video_root,
-        fps=2,
+        fps=10,
         start=10,
         end=60,
         size=(args.img_size, args.img_size),
         fmt="png",
-        batch_size=5,
+        batch_size=20,
         mode=2,
         train_fn=train_fn
     )
@@ -814,7 +821,7 @@ def main():
         step_dirs = sorted([str(p) for p in Path(viz_dir).iterdir() if p.is_dir() and p.name.startswith("step_")])
         if step_dirs:
             video_out = os.path.join(summary.get("run_dir", "./outputs"), "pred_overlay.mp4")
-            merger = VideoFrameMerger(frame_dirs=step_dirs, output_path=video_out, fps=2, fourcc="mp4v", auto_batches=False)
+            merger = VideoFrameMerger(frame_dirs=step_dirs, output_path=video_out, fps=10, fourcc="mp4v", auto_batches=False)
             merger.merge()
         else:
             print(f"[WARN] No step_* directories found in {viz_dir}")

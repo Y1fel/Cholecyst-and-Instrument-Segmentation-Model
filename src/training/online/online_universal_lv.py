@@ -673,6 +673,12 @@ class OnlineLearner:
                 torch.cuda.empty_cache()
 
             # 4) 伪标签质控 (质量控制后处理参考版本2)
+            if pseudo_labels_np.ndim == 2:  # [H,W]
+                pseudo_labels_np = pseudo_labels_np[None, ...]  # -> [1,H,W]
+            elif pseudo_labels_np.ndim == 3:  # [N,H,W]，正常情况
+                pass
+            elif pseudo_labels_np.ndim == 4:  # [N,1,H,W]
+                pseudo_labels_np = pseudo_labels_np.squeeze(1)
             try:
                 pseudo_labels_np = denoise_pseudo_label(
                     pseudo_labels_np[np.newaxis, ...] if pseudo_labels_np.ndim == 2 else pseudo_labels_np,
@@ -904,14 +910,13 @@ def main():
         learner.run_online_learning(data_loader, val_loader)
 
     extractor = VideoFrameExtractor(output_dir="src/dataio/datasets")
-    extractor.extract(
+    _, native_fps=extractor.extract(
         video_path=args.video_root,
-        fps=2,
         start=10,
         end=60,
         size=(args.img_size, args.img_size),
         fmt="png",
-        batch_size=5,
+        batch_size=20,
         mode=2,
         train_fn=train_fn
     )
@@ -930,7 +935,7 @@ def main():
         step_dirs = sorted([str(p) for p in Path(viz_dir).iterdir() if p.is_dir() and p.name.startswith("step_")])
         if step_dirs:
             video_out = os.path.join(summary.get("run_dir", "./outputs"), "pred_overlay.mp4")
-            merger = VideoFrameMerger(frame_dirs=step_dirs, output_path=video_out, fps=2, fourcc="mp4v",
+            merger = VideoFrameMerger(frame_dirs=step_dirs, output_path=video_out, fps=int(native_fps), fourcc="mp4v",
                                       auto_batches=False)
             merger.merge()
         else:
