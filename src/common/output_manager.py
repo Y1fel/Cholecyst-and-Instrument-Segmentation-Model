@@ -4,11 +4,18 @@ from datetime import datetime
 from typing import Dict, Any
 
 class OutputManager:
-    def __init__(self, model_type: str = "baseline", output_dir: str = "./outputs"):
+    def __init__(self, model_type: str = "baseline", output_dir: str = "./outputs", run_dir: str = None):
         self.model_type = model_type
         self.output_dir = output_dir
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = os.path.join(self.output_dir, f"{self.model_type}_{self.timestamp}")
+        
+        if run_dir is not None:
+            # 使用指定的run目录（恢复训练时）
+            self.run_dir = run_dir
+            self.timestamp = os.path.basename(run_dir).split('_')[-1] if '_' in os.path.basename(run_dir) else "resumed"
+        else:
+            # 创建新的run目录（正常训练时）
+            self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_dir = os.path.join(self.output_dir, f"{self.model_type}_{self.timestamp}")
 
         # build basic directory structure
         self._setup_directories()

@@ -770,10 +770,7 @@ def main():
     if resume_manager:
         # 使用原来的run目录
         original_run_dir = resume_info['run_dir']
-        output_mgr = OutputManager(model_type=model_tag)
-        # 覆盖run_dir为原来的目录
-        output_mgr.run_dir = original_run_dir
-        output_mgr._setup_directories()  # 确保目录存在
+        output_mgr = OutputManager(model_type=model_tag, run_dir=original_run_dir)
         print(f"=== RESUME: Using original output directory: {original_run_dir} ===")
     else:
         # 正常训练：创建新的输出目录
