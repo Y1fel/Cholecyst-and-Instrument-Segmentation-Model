@@ -161,6 +161,18 @@ def parse_args():
                    help="Number of samples for evidence package evaluation")
     p.add_argument("--evidence_experiment_name", type=str, default=None,
                    help="Experiment name for evidence package (auto-detected if None)")
+    
+    # 恢复训练参数
+    p.add_argument("--resume", type=str, default=None,
+                   help="Resume training from checkpoint directory (e.g., outputs/model_20250911_230321/checkpoints)")
+    p.add_argument("--resume_from_best", action='store_true', default=False,
+                   help="Resume from best checkpoint instead of latest epoch checkpoint")
+    
+    # 恢复时可选的参数覆盖（预留扩展）
+    p.add_argument("--resume_lr", type=float, default=None,
+                   help="Override learning rate when resuming (optional)")
+    p.add_argument("--resume_epochs", type=int, default=None,
+                   help="Override total epochs when resuming (optional)")
 
     return p.parse_args()
 
@@ -646,9 +658,78 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
     
     return package_paths
 
+# setup resume training
+def setup_resume_training(args):
+    """
+    设置恢复训练
+    Returns:
+        (resume_manager, resume_info, start_epoch) 或 (None, None, 0)
+    """
+    if not args.resume:
+        return None, None, 0
+    
+    from src.training.resume_manager import ResumeManager
+    
+    print("=== RESUME MODE ACTIVATED ===")
+    resume_manager = ResumeManager(args.resume)
+    resume_info = resume_manager.get_resume_info(args.resume_from_best)
+    
+    # 从checkpoint信息中获取起始epoch
+    start_epoch = resume_info['checkpoint_info']['epoch']
+    
+    # 可选：使用原始配置覆盖当前args（预留功能）
+    if resume_info['original_config'] and hasattr(args, 'use_original_config'):
+        if args.use_original_config:
+            original_args = resume_info['original_config']
+            for key, value in original_args.items():
+                if hasattr(args, key) and getattr(args, key) is None:
+                    setattr(args, key, value)
+    
+    return resume_manager, resume_info, start_epoch
 
+# use resume overrides
+def apply_resume_overrides(args):
+    """应用恢复时的参数覆盖"""
+    if args.resume_lr is not None:
+        print(f"Override learning rate: {args.lr} -> {args.resume_lr}")
+        args.lr = args.resume_lr
+    
+    if args.resume_epochs is not None:
+        print(f"Override total epochs: {args.epochs} -> {args.resume_epochs}")
+        args.epochs = args.resume_epochs
+
+# load resume states
+def load_resume_states(model, optimizer, scheduler, resume_info, device):
+    """
+    加载恢复状态到模型、优化器、调度器
+    """
+    checkpoint_info = resume_info['checkpoint_info']
+    
+    # 加载模型状态
+    if checkpoint_info['model_state_dict']:
+        model.load_state_dict(checkpoint_info['model_state_dict'])
+        print(f"✓ Model state loaded from epoch {checkpoint_info['epoch']}")
+    
+    # 加载优化器状态
+    if checkpoint_info['optimizer_state_dict'] and optimizer:
+        optimizer.load_state_dict(checkpoint_info['optimizer_state_dict'])
+        print(f"✓ Optimizer state loaded")
+    
+    # 加载调度器状态
+    if checkpoint_info['scheduler_state_dict'] and scheduler:
+        scheduler.load_state_dict(checkpoint_info['scheduler_state_dict'])
+        print(f"✓ Scheduler state loaded")
+
+# main function
 def main():
     args = parse_args()
+
+    # setup resume training
+    resume_manager, resume_info, start_epoch = setup_resume_training(args)
+
+    # apply resume overrides
+    if resume_manager:
+        apply_resume_overrides(args)
 
     # load config and validate args
     config = load_config(args.config)
@@ -679,16 +760,27 @@ def main():
     monitor = TrainMonitor(enable_gpu_monitor=args.enable_gpu_monitor)
     monitor.start_timing()
 
-    # output manager - 修复模型标签逻辑
+    # output manager
     if args.enable_distillation:
         model_tag = f"distill_{args.teacher_model}_to_{args.student_model}"
     else:
         model_tag = args.model if args.model_type is None else args.model_type
     
-    output_mgr = OutputManager(model_type=model_tag)
-    output_mgr.save_config(vars(args))
+    # 恢复训练时使用原来的输出目录
+    if resume_manager:
+        # 使用原来的run目录
+        original_run_dir = resume_info['run_dir']
+        output_mgr = OutputManager(model_type=model_tag)
+        # 覆盖run_dir为原来的目录
+        output_mgr.run_dir = original_run_dir
+        output_mgr._setup_directories()  # 确保目录存在
+        print(f"=== RESUME: Using original output directory: {original_run_dir} ===")
+    else:
+        # 正常训练：创建新的输出目录
+        output_mgr = OutputManager(model_type=model_tag)
+        output_mgr.save_config(vars(args))  # 正常训练时保存配置
 
-    # 
+    # load custom mapping
     custom_mapping = None
     if args.custom_mapping_file:
         with open(args.custom_mapping_file, 'r') as f:
@@ -738,6 +830,7 @@ def main():
     valid_counter = Counter()
     sample_size = min(200, len(full_dataset))
     
+    # check first N samples' labels
     for i in range(sample_size):
         try:
             _, mask = full_dataset[i]  # 假设 __getitem__ 返回 image, mask
@@ -748,11 +841,11 @@ def main():
             
             lab = mask_tensor.numpy()
             valid = lab[lab != 255]
-            if valid.size == 0:
-                print(f"[HEALTH CHECK] sample#{i}: only ignore")
-            else:
-                u, c = np.unique(valid, return_counts=True)
-                print(f"[HEALTH CHECK] sample#{i}: {dict(zip(u.tolist(), c.tolist()))}")
+            # if valid.size == 0:
+            #     print(f"[HEALTH CHECK] sample#{i}: only ignore")
+            # else:
+            #     u, c = np.unique(valid, return_counts=True)
+            #     print(f"[HEALTH CHECK] sample#{i}: {dict(zip(u.tolist(), c.tolist()))}")
         except Exception as e:
             print(f"[HEALTH CHECK] Warning: Failed to check sample {i}: {e}")
             continue
@@ -953,10 +1046,29 @@ def main():
         }
     else:
         print(f" Standard Training: {args.model}")
-    print(f"Training for {args.epochs} epoch(s)...")
+    
+    # 改进epoch显示逻辑
+    if resume_manager:
+        remaining_epochs = max(0, args.epochs - start_epoch)
+        print(f"Training: Resume from epoch {start_epoch} → Continue to epoch {args.epochs-1} (总共{remaining_epochs}个新epoch)")
+        if remaining_epochs == 0:
+            print(f"⚠️  WARNING: 已到达目标epoch ({args.epochs})，无需继续训练！")
+            print(f"   建议使用 --epochs {start_epoch + 5} 或更高的值来继续训练")
+    else:
+        print(f"Training: Start from epoch 0 → Train to epoch {args.epochs-1} (总共{args.epochs}个epoch)")
 
-    # Training loop
-    for epoch in range(args.epochs):
+    # if resume, load states
+    if resume_manager:
+        load_resume_states(model, optimizer, scheduler, resume_info, device)
+        print(f"=== RESUMING FROM EPOCH {start_epoch} ===")
+
+    # Training loop - 检查是否有epoch需要训练
+    if start_epoch >= args.epochs:
+        print(f"🛑 训练已完成！当前epoch ({start_epoch}) >= 目标epoch ({args.epochs})")
+        print(f"   如需继续训练，请使用 --epochs {start_epoch + 10} 等更高的值")
+        return
+    
+    for epoch in range(start_epoch, args.epochs):
         # Train for one epoch
         if args.enable_distillation:
             train_results = train_one_epoch(model, train_loader, criterion, optimizer, device, monitor, epoch, args, teacher_model)

@@ -7,31 +7,34 @@
 Cholecyst-and-Instrument-Segmentation-Model/
 ├─ README.md                          # ✅ 项目简介
 ├─ LICENSE                            # ✅ 许可证声明
-├─ PROJECT_STRUCTURE.md               # ✅ 项目结构文档
+├─ PROJECT_STRUCTURE.md               # ✅ 项目结构文档（本文件）
 ├─ .gitignore                         # ✅ Git忽略文件列表
+├─ monitor_kd_losses.py               # 🆕 知识蒸馏损失监控工具（实时分析训练趋势）
+├─ test_fov_integration.py            # 🆕 FOV集成测试脚本（视野遮罩功能验证）
+├─ palette_anomalies.csv              # 🆕 颜色调色板异常分析结果（数据质量检查）
 │
 ├─ configs/                           # ✅ YAML配置文件，统一管理参数（Single Source of Truth）
 │  ├─ universal_template_config.yaml # ✅ 通用多分类训练配置模板
-│  ├─ binary_template_config.yaml    # 🆕 二分类专用配置模板
-│  ├─ datasets/                       # 🚧 数据集配置目录
-│  │  ├─ cholec80.yaml               # 📋 Cholec80数据集路径与参数
-│  │  └─ endovis.yaml                # 📋 EndoVis数据集路径与参数
-│  ├─ offline/                        # 🚧 离线阶段（重模型训练）参数目录
-│  │  ├─ baseline_min.yaml           # ✅ 极简配置（可选，不想配也可用命令行）
-│  │  ├─ unetpp_deeplabv3.yaml       # 📋 U-Net++和DeepLabV3配置
-│  │  └─ hrnet.yaml                  # 📋 HRNet配置
-│  ├─ online/                         # 🚧 在线阶段（轻量模型与自适应）参数目录
+│  ├─ binary_template_config.yaml    # ✅ 二分类专用配置模板
+│  ├─ teacher_training_config.yaml   # 🆕 教师模型训练配置（基础版）
+│  ├─ teacher_training_improved_config.yaml # 🆕 教师模型改进训练配置（优化参数）
+│  ├─ distillation_improved_config.yaml # 🆕 改进知识蒸馏配置（带优化策略）
+│  ├─ distillation_test_config.yaml  # 🆕 知识蒸馏测试配置（快速验证）
+│  ├─ kd_final_test_config.yaml      # 🆕 KD最终测试配置（完整流程验证）
+│  ├─ fov_test_config.yaml           # 🆕 FOV功能测试配置（视野遮罩测试）
+│  ├─ mapping_example.yaml           # 🆕 映射配置示例（数据标签映射参考）
+│  ├─ offline/                        # ✅ 离线阶段（重模型训练）参数目录
+│  │  └─ baseline_min.yaml           # ✅ 极简配置（可选，不想配也可用命令行）
+│  ├─ online/                         # � 在线阶段（轻量模型与自适应）参数目录（规划中）
 │  │  ├─ default_online.yaml         # 📋 默认在线推理参数（阈值、滑窗大小等）
 │  │  ├─ gating.yaml                 # 📋 多信号权重配置
 │  │  ├─ conservative_update.yaml     # 📋 BN-only / Decoder-lite / Adapter-only配置
 │  │  ├─ buffer_trio.yaml            # 📋 缓冲机制（迟滞、冷却、回滚）
 │  │  └─ escalation.yaml             # 📋 安全模式切换规则
-│  └─ ablations/                      # 🚧 消融实验配置目录
-│     ├─ offline_only.yaml           # 📋 仅离线模型
-│     ├─ online_naive.yaml           # 📋 简单在线更新
-│     ├─ no_entropy_gate.yaml        # 📋 无熵门控
-│     ├─ no_buffer_trio.yaml         # 📋 无缓冲机制
-│     └─ bn_only.yaml                # 📋 仅BN更新
+│  └─ experiments/                    # 🆕 实验配置目录（消融和对比实验）
+│     ├─ kd_student_config.yaml      # 🆕 知识蒸馏学生模型配置
+│     ├─ s_equal_config.yaml         # 🆕 S-Equal基线实验（等预算学生模型）
+│     └─ s_long_config.yaml          # 🆕 S-Long扩展实验（长期训练配置）
 │
 ├─ data/                              # ✅ 数据集元信息或软链接（原数据不放入仓库）
 │  └─ README.md                      # 📋 数据挂载说明
@@ -46,9 +49,10 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │  └─ diagrams/                      # ✅ Mermaid流程图目录
 │
 ├─ scripts/                           # ✅ 命令行脚本（可复现运行）
-│  ├─ seg8k_fetch.py                 # ✅ 数据集下载脚本
-│  ├─ demo_multiclass_color.py       # ✅ 多类分割可视化演示脚本
-│  ├─ validate_watershed_mechanism.py # 🆕 Watershed机制验证脚本（含真实模型预测）
+│  ├─ seg8k_fetch.py                 # ✅ 数据集下载脚本（缓存管理，断点续传）
+│  ├─ demo_multiclass_color.py       # ✅ 多类分割可视化演示脚本（PALETTE验证）
+│  ├─ validate_watershed_mechanism.py # ✅ Watershed机制验证脚本（含真实模型预测，特征可视化）
+│  ├─ post_training_viz.py           # ✅ 训练后可视化脚本（预测结果生成和对比分析）
 │  ├─ train_monitor.py               # ✅ 训练监控模块（已移至src/common/）
 │  ├─ train_offline.sh               # 📋 离线训练入口
 │  ├─ distill.sh                     # 📋 重→轻蒸馏
@@ -81,19 +85,21 @@ Cholecyst-and-Instrument-Segmentation-Model/
 │
 ├─ src/                               # ✅ 核心源代码
    ├─ common/                        # ✅ 公共工具
-   │  ├─ constants.py                # ✅ 全局常量定义（CLASSES、PALETTE、IGNORE_INDEX）
-   │  ├─ output_manager.py           # ✅ 输出目录管理和结果保存
-   │  └─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条、ETA预估）
+   │  ├─ constants.py                # ✅ 全局常量定义（CLASSES、PALETTE、IGNORE_INDEX，数据路径映射）
+   │  ├─ output_manager.py           # ✅ 输出目录管理和结果保存（检查点、可视化、日志统一管理）
+   │  ├─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条、ETA预估）
+   │  ├─ ema_safety.py               # ✅ EMA权重安全更新（防止过拟合，自适应衰减率）
+   │  └─ pseudo_label_generator.py   # ✅ 伪标签生成器（在线自适应学习的核心组件）
    ├─ dataio/                        # ✅ 数据加载与预处理
    │  └─ datasets/                   # ✅ 数据集类
-   │     └─ seg_dataset_min.py       # ✅ 最小数据集类（images/、masks/，支持二分类/多分类切换）
+   │     └─ seg_dataset_min.py       # ✅ 最小数据集类（images/、masks/，支持二分类/多分类切换，FOV遮罩功能）
    ├─ eval/                          # ✅ 评估模块
    │  └─ evaluator.py                # ✅ 分割指标评估器（IoU、Dice、Accuracy等，支持二分类/多分类）
    ├─ models/                        # ✅ 模型结构
-   │  ├─ model_zoo.py                # ✅ 模型动物园（统一模型构建和管理）
+   │  ├─ model_zoo.py                # ✅ 模型动物园（统一模型构建和管理，支持教师/学生模型实例化）
    │  ├─ baseline/                   # ✅ 基线模型
-   │  │  └─ unet_min.py              # ✅ 最小 U-Net
-   │  ├─ offline/                    # ✅ 离线重模型目录（预留）
+   │  │  └─ unet_min.py              # ✅ 最小 U-Net（基础分割架构）
+   │  ├─ offline/                    # ✅ 离线重模型目录（预留扩展）
    │  └─ online/                     # ✅ 在线/轻量模型
    │     ├─ mobile_unet.py           # ✅ MobileNet风格的轻量U-Net（深度可分离卷积）
    │     └─ adaptive_unet.py         # ✅ 自适应U-Net（带适配器层，支持在线学习）
@@ -112,7 +118,8 @@ Cholecyst-and-Instrument-Segmentation-Model/
    │  └─ conservative_updater.py    # 📋 保守更新模式（BN-only/Decoder-Lite/Adapter-only）
    └─ viz/                          # ✅ 可视化工具
       ├─ colorize.py                 # ✅ 颜色映射和可视化函数（id_to_color、make_triplet、overlay）
-      └─ visualizer.py               # ✅ 可视化器（预测结果、叠加图像，支持任务自动检测）
+      ├─ visualizer.py               # ✅ 可视化器（预测结果、叠加图像，支持任务自动检测）
+      └─ distillation_visualizer.py  # 🆕 知识蒸馏可视化工具（特征图对比、损失分析）
 ```
 
 ## 🔒 在线学习安全机制详解
@@ -1100,6 +1107,39 @@ flowchart TD
 
 ---
 
-**当前状态**: 核心训练框架已完成，正在构建安全机制和知识蒸馏系统
+## 🆕 最新更新记录（Latest Updates）
+
+### 📊 监控与分析工具 (2024-12-27)
+- **`monitor_kd_losses.py`** - 知识蒸馏损失监控工具
+  - 自动识别最新训练输出目录
+  - matplotlib可视化损失趋势和分布
+  - 训练建议和异常检测
+  - 支持交互式图表和保存功能
+
+- **`test_fov_integration.py`** - FOV集成测试脚本
+  - FOV遮罩功能完整性验证
+  - 参数验证和功能测试套件
+  - 自动化测试流程
+
+- **`palette_anomalies.csv`** - 颜色调色板异常分析
+  - 数据质量检查结果
+  - 额外颜色识别：[170,255,0], [210,140,140]
+  - 跨400+视频帧的分析数据
+
+### 🎯 实验配置扩展 (2024-12-27)
+- **实验配置目录** (`configs/experiments/`)
+  - `kd_student_config.yaml` - 知识蒸馏学生模型配置
+  - `s_equal_config.yaml` - S-Equal基线实验（等预算比较）
+  - `s_long_config.yaml` - S-Long扩展实验（长期训练）
+
+### 🔧 功能增强 (2024-12-27)
+- **FOV处理能力** - 视野遮罩集成到数据集和训练流程
+- **证据包生成** - 实验结果打包和追踪系统
+- **知识蒸馏框架** - 完整的Teacher-Student训练支持
+- **可视化增强** - 训练过程和结果的实时监控
+
+---
+
+**当前状态**: 核心训练框架已完成，知识蒸馏系统已集成，正在构建在线学习安全机制
 **预计完成**: 第一优先级功能预计2-3周内完成
 **技术重点**: 在线学习安全性、知识蒸馏效果、系统稳定性

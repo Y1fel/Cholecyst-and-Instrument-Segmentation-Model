@@ -25,6 +25,10 @@ class OutputManager:
         for dir_path in dirs: # loop and make
             os.makedirs(dir_path, exist_ok=True)
 
+    # Get run directory path
+    def get_run_dir(self) -> str:
+        return self.run_dir
+
     # Get path for visualizations
     def get_vis_dir(self) -> str:
         return os.path.join(self.run_dir, "visualizations")

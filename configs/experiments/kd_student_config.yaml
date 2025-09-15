@@ -22,7 +22,7 @@ classification_scheme: "3class_org"
 enable_distillation: true  # 关键：启用KD
 teacher_model: "unet_plus_plus"
 student_model: "adaptive_unet"
-teacher_checkpoint: "outputs/unet_plus_plus_20250906_033807/checkpoints/unet_plus_plus_best.pth"
+teacher_checkpoint: "outputs/unet_plus_plus_20250911_230321/checkpoints/unet_plus_plus_best.pth"
 
 # 蒸馏超参数
 distill_temperature: 4.0
