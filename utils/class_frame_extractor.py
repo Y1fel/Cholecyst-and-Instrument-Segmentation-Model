@@ -101,8 +101,8 @@ class VideoFrameExtractor:
         native_fps = cap.get(cv2.CAP_PROP_FPS) or 0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-        start_frame = int(start * native_fps) if start else 0
-        end_frame = int(end * native_fps) if end else total
+        start_frame = 0
+        end_frame = 750
 
         stride = 1
         #if fps and native_fps > 0:

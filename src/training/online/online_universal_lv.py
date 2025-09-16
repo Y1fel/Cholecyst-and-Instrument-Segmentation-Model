@@ -56,7 +56,7 @@ def parse_args():
     p.add_argument("--video_root", type=str, default=None)
     p.add_argument("--split", type=str, default="train")
     p.add_argument("--img_size", type=int, default=512)
-    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--num_workers", type=int, default=0)
 
     # 训练参数
@@ -200,45 +200,39 @@ def flatten_val_loader(val_loader, binary: bool = False):
       - binary=False -> labels long,  shape [N,H,W]
     """
     for images, labels in val_loader:
-        # images: [B, T, C, H, W] 或 [B, C, H, W]
         if images.ndim == 5:  # [B, T, C, H, W]
             b, t, c, h, w = images.shape
             images = images.view(b * t, c, h, w)
+
             if labels is not None:
-                # labels 原为 [B, T, H, W] 或 [B, T, 1, H, W]（你 dataset 返回的是 [T,1,H,W]）
-                # 目标最终希望是 [B*T, H, W] (multiclass) or [B*T,1,H,W] (binary)
-                # 先 squeeze 可能存在的 channel dim
-                if labels.ndim == 4:  # [B, T, H, W] already
+                if labels.ndim == 4:  # [B, T, H, W]
                     labels = labels.view(b * t, h, w)
                 elif labels.ndim == 5:  # [B, T, 1, H, W]
                     labels = labels.view(b * t, 1, h, w)
                 else:
-                    # 其它情况尝试展平
-                    labels = labels.view(b * t, *labels.shape[2:])
+                    raise ValueError(f"Unexpected labels shape: {labels.shape}")
 
-        else:
-            # images is [B, C, H, W], labels maybe [B, H, W] or [B,1,H,W]
+        elif images.ndim == 4:  # [B, C, H, W]
+            b, c, h, w = images.shape
+            # no change
             if labels is not None:
-                if labels.ndim == 4:  # [B, 1, H, W]
-                    labels = labels.view(labels.size(0), 1, labels.size(2), labels.size(3))
-                # else assume [B, H, W], leave as is
+                if labels.ndim == 4 and labels.size(1) == 1:  # [B,1,H,W]
+                    labels = labels.view(b, 1, h, w)
+                elif labels.ndim == 3:  # [B,H,W]
+                    pass
+                else:
+                    raise ValueError(f"Unexpected labels shape: {labels.shape}")
 
-        # 根据 binary 标志决定 labels 的 dtype/shape
+        # --- 强制 dtype 和 shape ---
         if labels is not None:
             if binary:
-                # BCEWithLogitsLoss: inputs float [N,1,H,W], targets float [N,1,H,W]
-                # 如果 labels 是 [N,H,W] -> unsqueeze channel dim
-                if labels.ndim == 3:  # [N, H, W]
+                if labels.ndim == 3:  # [N,H,W]
                     labels = labels.unsqueeze(1)  # -> [N,1,H,W]
-                # to float
-                if labels.dtype != torch.float32 and labels.dtype != torch.float:
-                    labels = labels.float()
+                labels = labels.float()
             else:
-                # CrossEntropyLoss: inputs [N,C,H,W], targets long [N,H,W]
                 if labels.ndim == 4 and labels.size(1) == 1:
                     labels = labels.squeeze(1)  # [N,H,W]
-                if labels.dtype != torch.long:
-                    labels = labels.long()
+                labels = labels.long()
 
         yield images, labels
 
@@ -247,19 +241,27 @@ def flatten_val_loader(val_loader, binary: bool = False):
 # Dataset (保持 online_universal.py 的 OnlineFrameDataset)
 # -----------------------
 class OnlineFrameDataset(Dataset):
+    """
+    每个索引 i 对应原始帧 i：
+      - 返回一个长度为 sequence_length 的帧序列，序列从 i 开始，末尾不足时用最后一帧补齐。
+      - 这样 dataset 长度 == 原始帧数量，保证每一帧至少被预测一次（作为序列的第一个帧）。
+    """
     def __init__(self, frame_paths, img_size=512, transform=None, sequence_length=5):
-        self.frame_paths = frame_paths
+        self.frame_paths = list(frame_paths)  # 保持原始顺序传入
         self.img_size = img_size
         self.transform = transform
-        self.sequence_length = sequence_length
+        self.sequence_length = max(1, int(sequence_length))
 
     def __len__(self):
-        return max(0, len(self.frame_paths) - self.sequence_length + 1)
+        return len(self.frame_paths)
 
     def __getitem__(self, index):
         frames = []
+        n = len(self.frame_paths)
+        # build sequence starting at index, pad using last frame if necessary
         for i in range(index, index + self.sequence_length):
-            img_path = self.frame_paths[i]
+            idx = i if i < n else (n - 1)  # clamp to last index
+            img_path = self.frame_paths[idx]
             img = cv2.imread(img_path, cv2.IMREAD_COLOR)
             if img is None:
                 raise FileNotFoundError(f"Image not found: {img_path}")
@@ -268,10 +270,14 @@ class OnlineFrameDataset(Dataset):
             img = img.astype(np.float32) / 255.0
             img = np.transpose(img, (2, 0, 1))
             frames.append(torch.from_numpy(img).float())
-        frames = torch.stack(frames, dim=0)
+        frames = torch.stack(frames, dim=0)  # [seq_len, C, H, W]
+
+        # dummy mask kept for compatibility (sequence_length, 1, H, W) or (sequence_length, H, W)
         dummy_mask = torch.zeros(1, self.img_size, self.img_size)
         targets = torch.stack([dummy_mask] * self.sequence_length, dim=0)
+
         return frames, targets
+
 
 
 # -----------------------
@@ -330,17 +336,21 @@ class FrameSelector:
 # Experience Replay Buffer (来自 origin，保留 push clone)
 # -----------------------
 class ExperienceReplayBuffer:
-    def __init__(self, capacity=1000):
-        self.buffer = deque(maxlen=capacity)
+    def __init__(self, capacity=100):
+        self.capacity = capacity
+        self.buffer = []
 
-    def push(self, state, target):
-        # 保存 CPU clone，避免引用共享
-        self.buffer.append((state.detach().cpu().clone(), target.detach().cpu().clone()))
+    def push(self, image, target):
+        # 保存到 CPU，避免显存被占用
+        self.buffer.append((image.detach().cpu().clone(),
+                            target.detach().cpu().clone()))
+        if len(self.buffer) > self.capacity:
+            self.buffer.pop(0)
 
     def sample(self, batch_size):
-        if len(self.buffer) < batch_size or batch_size == 0:
-            return None
-        return random.sample(self.buffer, batch_size)
+        if batch_size <= 0 or len(self.buffer) == 0:
+            return []  # 保持接口统一，避免返回 None
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
 
     def __len__(self):
         return len(self.buffer)
@@ -420,6 +430,7 @@ class OnlineLearner:
         self.args = args
         self.output_mgr = output_mgr
         self.monitor = monitor
+        self.global_frame_idx = 0
 
         # 损失
         self.criterion = nn.BCEWithLogitsLoss() if args.binary else nn.CrossEntropyLoss()
@@ -472,72 +483,79 @@ class OnlineLearner:
             except Exception as e:
                 print(f"[WARN] Failed to save best model: {e}")
 
-    def adapt_step(self, inputs, targets):
-        """
-        从 origin 迁移过来的 adapt_step：基于 frame_selector 决定是否用所有帧或仅中间帧，
-        与 experience replay 混合，计算 loss 并更新（针对 student）。
-        inputs: tensor (B, seq_len, C, H, W)
-        targets: tensor (B, seq_len, ...) - 这里只是占位（通常为 dummy）
-        返回: loss_val, frame_stats
-        """
+    def adapt_step(self, images, targets, pseudo_labels):
         self.model.train()
         self.optimizer.zero_grad()
 
+        processed_inputs = []
         processed_outputs = []
         processed_targets = []
-        frame_stats = {'all_frames': 0, 'single_frame': 0}
 
-        for i in range(inputs.size(0)):
-            frames = inputs[i]  # (seq_len, C, H, W)
-            tgs = targets[i]  # (seq_len, ...)
-            if self.frame_selector is None or self.frame_selector.should_process_all(frames):
-                frame_stats['all_frames'] += 1
-                for j in range(frames.size(0)):
-                    out = self.model(frames[j].unsqueeze(0)).squeeze(0)
-                    processed_outputs.append(out)
-                    processed_targets.append(tgs[j])
-            else:
-                frame_stats['single_frame'] += 1
-                middle_out = self.model(frames[frames.size(0) // 2].unsqueeze(0)).squeeze(0)
-                for j in range(frames.size(0)):
-                    processed_outputs.append(middle_out)
-                    processed_targets.append(tgs[j])
+        for i in range(images.size(0)):
+            frames = images[i]  # [seq_len, C, H, W]
+            tgs = targets[i]  # [seq_len, H, W]
+            psl = pseudo_labels[i]  # [seq_len, H, W]
 
-        if len(processed_outputs) == 0:
-            return None, frame_stats
+            # 取第一个伪标签作为 target
+            tgt = psl[0] if psl is not None else tgs[0]
 
-        outputs = torch.stack(processed_outputs, dim=0)
-        ttargets = torch.stack(processed_targets, dim=0)
+            # 用 student 预测第一个 frame
+            out = self.model(frames[0].unsqueeze(0).to(self.device))
+            if out.shape[1] == 1:
+                out = torch.sigmoid(out)
 
-        # 从 buffer 采样并拼接（origin 行为）
+            processed_inputs.append(frames[0].detach().cpu().clone())
+            processed_outputs.append(out.squeeze(0).detach().cpu())
+            processed_targets.append(tgt.detach().cpu().clone())
+
+        # stack
+        outputs = torch.stack(processed_outputs, dim=0)  # [N,C,H,W] or [N,1,H,W]
+        ttargets = torch.stack(processed_targets, dim=0)  # [N,H,W] or [N,1,H,W]
+
+        # 保证 target shape/dtype 正确
+        if self.args.binary:
+            if ttargets.ndim == 3:  # [N,H,W]
+                ttargets = ttargets.unsqueeze(1)
+            ttargets = ttargets.float()
+        else:
+            if ttargets.ndim == 4 and ttargets.size(1) == 1:
+                ttargets = ttargets.squeeze(1)
+            ttargets = ttargets.long()
+
+        outputs = outputs.to(self.device)
+        ttargets = ttargets.to(self.device)
+
+        # === 使用 replay buffer ===
         if self.buffer is not None:
             n_replay = min(8, len(self.buffer))
-            replay_data = self.buffer.sample(n_replay) if n_replay > 0 else None
-            if replay_data is not None:
+            if n_replay > 0:
+                replay_data = self.buffer.sample(n_replay)
                 replay_inputs, replay_targets = zip(*replay_data)
                 replay_inputs = torch.stack(replay_inputs).to(self.device)
                 replay_targets = torch.stack(replay_targets).to(self.device)
-                outputs = torch.cat([outputs.to(self.device), replay_inputs], dim=0)
-                ttargets = torch.cat([ttargets.to(self.device), replay_targets], dim=0)
-            else:
-                outputs = outputs.to(self.device)
-                ttargets = ttargets.to(self.device)
-        else:
-            outputs = outputs.to(self.device)
-            ttargets = ttargets.to(self.device)
 
-        # 计算损失并更新（注意 outputs shape 需要和 criterion 匹配）
+                with torch.no_grad():
+                    replay_logits = self.model(replay_inputs)
+                    if replay_logits.shape[1] == 1:
+                        replay_logits = torch.sigmoid(replay_logits)
+
+                outputs = torch.cat([outputs, replay_logits], dim=0)
+                ttargets = torch.cat([ttargets, replay_targets.to(self.device)], dim=0)
+
+        # === 计算 loss & 反传 ===
         loss = self.criterion(outputs, ttargets)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
-        # push 当前数据到 buffer（origin 行为）
+        # === 把当前 batch 存入 buffer ===
         if self.buffer is not None:
-            for i in range(outputs.size(0)):
-                self.buffer.push(outputs[i].detach().cpu(), ttargets[i].detach().cpu())
+            for i in range(len(processed_inputs)):
+                self.buffer.push(
+                    processed_inputs[i],
+                    processed_targets[i].long() if not self.args.binary else processed_targets[i].float()
+                )
 
-        return float(loss.item()), frame_stats
+        return loss.item()
 
     def run_online_learning(self, train_loader, val_loader=None):
         """
@@ -563,8 +581,6 @@ class OnlineLearner:
         step_times = []
 
         for (batch_idx, (images, _)) in enumerate(train_loader):
-            if self.global_step >= self.args.online_steps:
-                break
 
             images = images.to(self.device, non_blocking=True)  # (B, seq_len, C, H, W)
             batch_size, seq_len, c, h, w = images.shape
@@ -598,7 +614,6 @@ class OnlineLearner:
 
             # 剂量控制：每步都设置可训练层 (来自版本1)
             set_trainable_layers(self.model, mode=update_layers, last_n=update_last_n)
-
             t0 = time.time()
             if not do_update:
                 print(f"[Step {self.global_step}] 跳过参数更新，原因: {reason}")
@@ -621,8 +636,13 @@ class OnlineLearner:
                     student_preds = torch.argmax(student_logits, dim=1)
 
             if self.args.save_viz:
-                batch_viz_dir = os.path.join(viz_dir, f"step_{self.global_step}_preds")
+                video_name = os.path.splitext(os.path.basename(self.args.video_root))[0]
+
+                # 每个样本的 batch 子目录
+                batch_name = f"batch_{batch_idx:04d}"
+                batch_viz_dir = os.path.join(viz_dir, batch_name)
                 os.makedirs(batch_viz_dir, exist_ok=True)
+
                 for i in range(student_preds.size(0)):
                     pred_np = student_preds[i].cpu().numpy().astype(np.uint8)
                     img_np = flat_imgs[i].cpu().numpy().transpose(1, 2, 0)
@@ -631,7 +651,11 @@ class OnlineLearner:
                     else:
                         img_vis = img_np.astype(np.uint8)
                     overlay = self.visualizer.create_overlay_image(img_vis, pred_np)
-                    save_path = os.path.join(batch_viz_dir, f"pred_{i:03d}.png")
+
+                    # 全局递增编号
+                    self.global_frame_idx += 1
+                    save_name = f"{video_name}_{self.global_frame_idx:06d}.png"
+                    save_path = os.path.join(batch_viz_dir, save_name)
                     plt.imsave(save_path, overlay)
 
             # 2) frame selector -> selected_indices
@@ -827,7 +851,7 @@ class OnlineLearner:
 
             if val_loader is not None and (self.global_step % self.args.eval_interval == 0):
                 # 使用内部稳定的验证函数（不依赖外部 Evaluator 的内部实现）(调用验证参考版本2)
-                flat_val_iterable = flatten_val_loader(val_loader, binary=self.args.binary)
+                flat_val_iterable = flatten_val_loader(val_loader)
                 # 注意 num_classes：优先使用 student/args 中的设置
                 num_classes = getattr(self.args, "student_num_classes", None) or getattr(self.args, "num_classes",
                                                                                          None) or 2
@@ -899,15 +923,15 @@ def main():
             return
         print(f"Processing batch with {len(batch_frames)} frames: {batch_dir_path}")
 
-        dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=5)
+        dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=args.update_interval)
         data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                  pin_memory=True)
 
         # 创建 val_loader（使用同一批次做简单验证，用于 viz / evaluate）
-        val_dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=5)
+        val_dataset = OnlineFrameDataset(batch_frames, img_size=args.img_size, sequence_length=args.update_interval)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-        learner.run_online_learning(data_loader, val_loader)
+        learner.run_online_learning(data_loader, None)
 
     extractor = VideoFrameExtractor(output_dir="src/dataio/datasets")
     _, native_fps=extractor.extract(
@@ -916,7 +940,7 @@ def main():
         end=60,
         size=(args.img_size, args.img_size),
         fmt="png",
-        batch_size=20,
+        batch_size=100,
         mode=2,
         train_fn=train_fn
     )
@@ -932,7 +956,7 @@ def main():
     # 合并 step_* 目录生成视频（保持新版行为）
     try:
         viz_dir = output_mgr.get_vis_dir()
-        step_dirs = sorted([str(p) for p in Path(viz_dir).iterdir() if p.is_dir() and p.name.startswith("step_")])
+        step_dirs = sorted([str(p) for p in Path(viz_dir).iterdir() if p.is_dir() and p.name.startswith("batch_")])
         if step_dirs:
             video_out = os.path.join(summary.get("run_dir", "./outputs"), "pred_overlay.mp4")
             merger = VideoFrameMerger(frame_dirs=step_dirs, output_path=video_out, fps=int(native_fps), fourcc="mp4v",

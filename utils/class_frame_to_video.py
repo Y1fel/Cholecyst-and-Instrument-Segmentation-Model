@@ -1,4 +1,5 @@
 import cv2
+import os
 from pathlib import Path
 from typing import List, Union
 
@@ -63,41 +64,35 @@ class VideoFrameMerger:
         return sorted(frames)
 
     def merge(self):
-        frames = self._load_frames()
-        if not frames:
-            raise RuntimeError("没有找到任何帧，请检查输入目录！")
+        # 收集所有 batch 目录里的图片
+        all_frames = []
+        for frame_dir in self.frame_dirs:
+            for f in os.listdir(frame_dir):
+                if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    all_frames.append(os.path.join(frame_dir, f))
 
-        # 获取第一帧大小
-        first_frame = cv2.imread(str(frames[0]))
-        if self.size is None:
-            h, w = first_frame.shape[:2]
-            self.size = (w, h)
+        # ✅ 按文件名排序（全局排序，而不是按 batch 再拼）
+        all_frames = sorted(all_frames, key=lambda x: Path(x).name)
 
-        # 初始化视频写入器
-        fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
-        out = cv2.VideoWriter(self.output_path, fourcc_code, self.fps, self.size)
+        if not all_frames:
+            print("[WARN] No frames found to merge.")
+            return
 
-        failed_frames = []
+        # 读取第一帧确定尺寸
+        first_frame = cv2.imread(all_frames[0])
+        if first_frame is None:
+            print("[ERROR] Cannot read first frame.")
+            return
+        h, w = first_frame.shape[:2]
 
-        with open(self.log_path, "w", encoding="utf-8") as log_file:
-            for f in frames:
-                img = cv2.imread(str(f))
-                if img is None:
-                    log_file.write(f"无法读取帧: {f}\n")
-                    failed_frames.append(str(f))
-                    continue
-                if (img.shape[1], img.shape[0]) != self.size:
-                    img = cv2.resize(img, self.size)
-                out.write(img)
-                log_file.write(f"{f}\n")
+        fourcc = cv2.VideoWriter.fourcc(*"mp4v")
+        out = cv2.VideoWriter(self.output_path, fourcc, self.fps, (w, h))
+
+        for frame_file in all_frames:
+            frame = cv2.imread(frame_file)
+            if frame is None:
+                continue
+            out.write(frame)
 
         out.release()
-
-        if self.save_failed_log and failed_frames:
-            with open(self.failed_log_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(failed_frames))
-
-        print(f"视频已保存到: {self.output_path}, 共 {len(frames)} 帧")
-        print(f"合并日志已保存到: {self.log_path}")
-        if self.save_failed_log and failed_frames:
-            print(f"失败帧日志已保存到: {self.failed_log_path}, 共 {len(failed_frames)} 张")
+        print(f"视频已保存到: {self.output_path}, 共 {len(all_frames)} 帧")
