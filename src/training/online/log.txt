@@ -17,4 +17,49 @@ python -m src.training.online.online_universal_v1 --video_root src/dataio/datase
 python -m src.training.online.online_universal_v1 --video_root src/dataio/datasets/cholec80/videos/video01.mp4 --student_model_path checkpoints/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path checkpoints/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode triggered --update_layers lastN --update_last_n 2
 
 # online_universal_lv.py命令行
-python -m src.training.online.online_universal_lv --video_root debug/video01.mp4 --student_model_path debug/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path debug/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 400 --save_pred_every_batch --update_mode fixed --update_interval 5 --update_layers bn
+python -m src.training.online.online_universal_better_video --video_root debug/video01.mp4 --student_model_path debug/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path debug/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode fixed --update_interval 20 --update_layers bn
+
+# 使用源视频帧率写出、每帧可视化、全程在线学习
+python -m src.training.online.online_universal_better_video \
+  --video_root debug/video01.mp4 \
+  --student_model_path debug/distill_unet_plus_plus_to_adaptive_unet_student_best.pth \
+  --student_model_name adaptive_unet \
+  --student_num_classes 3 \
+  --offline_model_path debug/unet_plus_plus_best.pth \
+  --offline_model_name unet_plus_plus \
+  --offline_num_classes 3 \
+  --img_size 512 \
+  --online_steps -1 \
+  --viz_stride 1 \
+  --writer_fps 0 \
+  --stream_output
+
+# 指定较低写出帧率（拉长成片，如 10 FPS）
+python -m src.training.online.online_universal_better_video `
+  --video_root debug\video01.mp4 `
+  --student_model_path outputs\adaptive_unet_20250916_141553\student_best.pth `
+  --student_model_name adaptive_unet `
+  --student_num_classes 3 `
+  --offline_model_path debug\unet_plus_plus_best.pth `
+  --offline_model_name unet_plus_plus `
+  --offline_num_classes 3 `
+  --img_size 512 `
+  --online_steps -1 `
+  --viz_stride 1 `
+  --writer_fps 10 `
+  --stream_output
+
+# 先按吞吐估算 FPS（第20帧会打印建议值，重跑时用该值）
+python -m src.training.online.online_universal_better_video `
+  --video_root debug\video01.mp4 `
+  --student_model_path outputs\adaptive_unet_20250916_141553\student_best.pth `
+  --student_model_name adaptive_unet `
+  --student_num_classes 3 `
+  --offline_model_path debug\unet_plus_plus_best.pth `
+  --offline_model_name unet_plus_plus `
+  --offline_num_classes 3 `
+  --img_size 512 `
+  --online_steps -1 `
+  --viz_stride 1 `
+  --writer_fps -1 `
+  --stream_output
