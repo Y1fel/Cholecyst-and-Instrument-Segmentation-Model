@@ -453,48 +453,62 @@ def streaming_online_loop(args, learner):
                 else:
                     update_reason = "qc-fail"
 
+            # 修正后的 Student 更新部分
             # Student 更新(受门控控制)
             may_update = (int(args.update_every_n) <= 1) or (learner.global_frame_idx % int(args.update_every_n) == 0)
-            if not may_update and pseudo_targets is not None and pseudo_targets.shape[0] > 0:
-                update_reason = f"gated(update_every_n={int(args.update_every_n)})"
+
             if pseudo_targets is not None and pseudo_targets.shape[0] > 0 and may_update:
                 learner.model.train()
                 learner.optimizer.zero_grad()
                 use_amp = args.use_amp and torch.cuda.is_available() and (autocast is not None)
-                skip = False
-            if use_amp:
-                with autocast():
-                    out = learner.model(img_tensor)
-                    loss_tensor = learner.criterion(out,
-                                                    pseudo_targets.float() if args.binary else pseudo_targets.long())
-                loss_tensor.backward()
-                torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
-                skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
-                if not skip:
-                    learner.optimizer.step()
-            else:
-                out = learner.model(img_tensor)
-                loss_tensor = learner.criterion(out, pseudo_targets.float() if args.binary else pseudo_targets.long())
-                loss_tensor.backward()
-                torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
-                skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
-                if not skip:
-                    learner.optimizer.step()
-                loss_val = float(loss_tensor.item())
-                if not skip:
-                    did_update = True
-                    update_reason = update_reason
-                else:
-                    did_update = False
-                    update_reason = "ema-safety-skip"
-                learner.loss_history.append(loss_val)
+
                 try:
-                    learner._save_best_model_if_improved(loss_val)
+                    if use_amp:
+                        with autocast():
+                            out = learner.model(img_tensor)
+                            loss_tensor = learner.criterion(out,
+                                                            pseudo_targets.float() if args.binary else pseudo_targets.long())
+                        loss_tensor.backward()
+                    else:
+                        out = learner.model(img_tensor)
+                        loss_tensor = learner.criterion(out,
+                                                        pseudo_targets.float() if args.binary else pseudo_targets.long())
+                        loss_tensor.backward()
+
+                    torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
+                    skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
+
+                    if not skip:
+                        learner.optimizer.step()
+                        did_update = True
+                        update_reason = "qc-pass"
+                    else:
+                        did_update = False
+                        update_reason = "ema-safety-skip"
+
+                    loss_val = float(loss_tensor.item())
+                    learner.loss_history.append(loss_val)
+
+                    try:
+                        learner._save_best_model_if_improved(loss_val)
+                    except Exception as e:
+                        print(f"[WARN] best-save failed: {e}")
+
+                    if learner.buffer is not None:
+                        learner.buffer.push(img_tensor[0].detach().cpu().clone(),
+                                            pseudo_targets[0].detach().cpu().clone())
+
                 except Exception as e:
-                    print(f"[WARN] best-save failed: {e}")
-                if learner.buffer is not None:
-                    learner.buffer.push(img_tensor[0].detach().cpu().clone(),
-                                        (pseudo_targets[0].detach().cpu().clone()))
+                    print(f"[Step {learner.global_step}] 训练过程异常: {e}")
+                    did_update = False
+                    update_reason = "training-error"
+
+            elif pseudo_targets is None:
+                update_reason = "no-pseudo-targets"
+            elif not may_update:
+                update_reason = f"gated(update_every_n={int(args.update_every_n)})"
+            else:
+                update_reason = "unknown"
 
             # 可视化叠加并流式写出（首次写时创建 writer）
             if learner.global_frame_idx % max(1, args.viz_stride) == 0:
