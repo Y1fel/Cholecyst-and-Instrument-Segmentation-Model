@@ -115,8 +115,8 @@ def parse_args():
                    help="特征蒸馏损失权重")
     
     # 训练阶段选择
-    p.add_argument("--stage", type=str, default="offline",
-                   choices=["offline", "online"], help="模型训练阶段")
+    p.add_argument("--stage", type=str, default="auto",
+                   choices=["offline", "online", "auto"], help="模型训练阶段")
     
     # 优化器选择
     p.add_argument("--optimizer", type=str, default="adamw",
@@ -174,6 +174,15 @@ def parse_args():
     p.add_argument("--resume_epochs", type=int, default=None,
                    help="Override total epochs when resuming (optional)")
 
+    # 数据划分策略选择
+    p.add_argument("--split_strategy", type=str, default="video_aware",
+                   choices=["video_aware", "frame_random", "from_file"],
+                   help="Data split strategy: video_aware (防泄漏), frame_random (旧逻辑), from_file (加载指定文件)")
+    p.add_argument("--split_file", type=str, default=None,
+                   help="Path to split YAML file (for --split_strategy=from_file)")
+    p.add_argument("--save_split", action='store_true', default=True,
+                   help="Save split result to YAML file for reproducibility")
+
     return p.parse_args()
 
 # validate arguments
@@ -192,8 +201,10 @@ def validate_args(args):
         errors.append("num_classes must be >= 1")
     
     # Data parameter validation
-    if not (0 < args.val_ratio < 1):
-        errors.append("val_ratio must be between 0 and 1")
+    # 只在非from_file模式下校验val_ratio
+    if getattr(args, 'split_strategy', 'video_aware') != "from_file":
+        if not (0 < args.val_ratio < 1):
+            errors.append("val_ratio must be between 0 and 1 when not using split file")
     if args.img_size < 32:
         warnings.append("img_size < 32 may cause issues")
     
@@ -214,6 +225,17 @@ def validate_args(args):
     # Knowledge distillation parameter validation
     if args.enable_distillation and not args.teacher_checkpoint:
         errors.append("KD模式必须提供 --teacher_checkpoint，禁止使用随机Teacher。")
+    
+    # Split strategy parameter validation
+    valid_strategies = ["video_aware", "from_file", "frame_random"]
+    if hasattr(args, 'split_strategy') and args.split_strategy not in valid_strategies:
+        errors.append(f"split_strategy must be one of {valid_strategies}")
+    
+    if hasattr(args, 'split_strategy') and args.split_strategy == "from_file":
+        if not hasattr(args, 'split_file') or not args.split_file:
+            errors.append("split_file is required when split_strategy is 'from_file'")
+        elif not os.path.exists(args.split_file):
+            errors.append(f"Split file not found: {args.split_file}")
     
     # Output validation results
     if warnings:
@@ -329,6 +351,285 @@ def merge_config_with_args(args, config):
         print("CONFIG: Using default values, no overrides needed")
     
     return args
+
+# video-aware train/val split to prevent video-level leakage
+def video_aware_train_val_split(dataset_pairs, val_ratio=0.25, seed=42):
+    """
+    按视频级别划分训练/验证集，避免视频级泄漏
+    
+    Args:
+        dataset_pairs: List of (img_path, mask_path) tuples from dataset
+        val_ratio: Validation ratio (0.25 = 25%)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        train_pairs, val_pairs: Two lists of (img_path, mask_path) tuples
+    """
+    import random
+    import re
+    
+    print(f"[VIDEO SPLIT] Performing video-aware train/val split with seed={seed}")
+    
+    # 1. 提取视频分组信息 - 使用正则表达式更稳定地提取video ID
+    video_groups = {}
+    for img_path, mask_path in dataset_pairs:
+        # 从路径提取视频ID：使用正则匹配 video\d+ 模式
+        normalized_path = img_path.replace('\\', '/')
+        m = re.search(r"(video\d+)", normalized_path)
+        video_id = m.group(1) if m else None
+        
+        if video_id is None:
+            raise ValueError(f"Cannot extract video ID from path: {img_path}")
+        
+        if video_id not in video_groups:
+            video_groups[video_id] = []
+        video_groups[video_id].append((img_path, mask_path))
+    
+    # 2. 统计视频信息
+    video_ids = sorted(video_groups.keys())
+    total_videos = len(video_ids)
+    total_frames = sum(len(frames) for frames in video_groups.values())
+    
+    print(f"[VIDEO SPLIT] Found {total_videos} videos with {total_frames} total frames")
+    for video_id in video_ids[:10]:  # 显示前10个视频的帧数
+        frame_count = len(video_groups[video_id])
+        print(f"[VIDEO SPLIT]   {video_id}: {frame_count} frames")
+    if total_videos > 10:
+        print(f"[VIDEO SPLIT]   ... and {total_videos - 10} more videos")
+    
+    # 3. 按视频随机划分（确保可重复性）
+    random.Random(seed).shuffle(video_ids)
+    
+    val_video_count = max(1, int(total_videos * val_ratio))  # 至少1个视频用于验证
+    val_videos = video_ids[:val_video_count]
+    train_videos = video_ids[val_video_count:]
+    
+    # 4. 收集训练和验证样本
+    train_pairs = []
+    val_pairs = []
+    
+    for video_id in train_videos:
+        train_pairs.extend(video_groups[video_id])
+    
+    for video_id in val_videos:
+        val_pairs.extend(video_groups[video_id])
+    
+    # 5. 统计和验证结果
+    actual_val_ratio = len(val_pairs) / (len(train_pairs) + len(val_pairs))
+    
+    print(f"[VIDEO SPLIT] ✅ Video-level split completed:")
+    print(f"[VIDEO SPLIT]   Training videos: {len(train_videos)} ({train_videos[:5]}{'...' if len(train_videos) > 5 else ''})")
+    print(f"[VIDEO SPLIT]   Validation videos: {len(val_videos)} ({val_videos})")
+    print(f"[VIDEO SPLIT]   Training frames: {len(train_pairs)}")
+    print(f"[VIDEO SPLIT]   Validation frames: {len(val_pairs)}")
+    print(f"[VIDEO SPLIT]   Actual val ratio: {actual_val_ratio:.3f} (target: {val_ratio:.3f})")
+    
+    # 6. 验证无视频重叠
+    train_video_set = set(train_videos) 
+    val_video_set = set(val_videos)
+    overlap = train_video_set & val_video_set
+    
+    if overlap:
+        raise ValueError(f"Video overlap detected: {overlap}")
+    else:
+        print(f"[VIDEO SPLIT] ✅ No video overlap - split is valid!")
+    
+    # 7. 保存分割结果用于复现和归档
+    import yaml
+    import os
+    
+    os.makedirs("splits", exist_ok=True)
+    split_record = {
+        "train": [img_path for img_path, _ in train_pairs],
+        "val": [img_path for img_path, _ in val_pairs],
+        "train_videos": sorted(train_videos),
+        "val_videos": sorted(val_videos),
+        "metadata": {
+            "total_videos": total_videos,
+            "total_frames": total_frames,
+            "train_frames": len(train_pairs),
+            "val_frames": len(val_pairs),
+            "target_val_ratio": val_ratio,
+            "actual_val_ratio": actual_val_ratio,
+            "seed": seed,
+            "split_method": "video_aware"
+        }
+    }
+    
+    split_file = "splits/seg8k_video_split.yaml"
+    with open(split_file, "w") as f:
+        yaml.safe_dump(split_record, f, sort_keys=False)
+    print(f"[VIDEO SPLIT] ✅ Split record saved to: {split_file}")
+    
+    return train_pairs, val_pairs
+
+def load_split_from_file(split_file, dataset_pairs):
+    """
+    从YAML文件加载预定义的训练/验证划分
+    
+    Args:
+        split_file: YAML文件路径
+        dataset_pairs: 原始数据集pairs，用于匹配路径
+    
+    Returns:
+        train_pairs, val_pairs: 训练和验证的(img_path, mask_path)列表
+    """
+    import yaml
+    
+    print(f"[SPLIT FROM FILE] Loading split from: {split_file}")
+    
+    if not os.path.exists(split_file):
+        raise FileNotFoundError(f"Split file not found: {split_file}")
+    
+    with open(split_file, 'r') as f:
+        split_data = yaml.safe_load(f)
+    
+    # 路径归一化函数，提高匹配稳定性
+    def normalize_path(path):
+        return os.path.normpath(path).replace("\\", "/")
+    
+    train_img_paths = {normalize_path(p) for p in split_data['train']}
+    val_img_paths = {normalize_path(p) for p in split_data['val']}
+    
+    # 根据图像路径匹配对应的pairs
+    train_pairs = []
+    val_pairs = []
+    unmatched_count = 0
+    
+    for img_path, mask_path in dataset_pairs:
+        normalized_img_path = normalize_path(img_path)
+        if normalized_img_path in train_img_paths:
+            train_pairs.append((img_path, mask_path))
+        elif normalized_img_path in val_img_paths:
+            val_pairs.append((img_path, mask_path))
+        else:
+            unmatched_count += 1
+            if unmatched_count <= 5:  # 只显示前5个未匹配的
+                print(f"[WARNING] Path not found in split file: {img_path}")
+            elif unmatched_count == 6:
+                print(f"[WARNING] ... and {unmatched_count - 5} more unmatched samples")
+    
+    print(f"[SPLIT FROM FILE] ✅ Loaded split:")
+    print(f"[SPLIT FROM FILE]   Train samples: {len(train_pairs)}")
+    print(f"[SPLIT FROM FILE]   Val samples: {len(val_pairs)}")
+    
+    # 显示元数据（如果有）
+    if 'metadata' in split_data:
+        metadata = split_data['metadata']
+        print(f"[SPLIT FROM FILE]   Split method: {metadata.get('split_method', 'unknown')}")
+        print(f"[SPLIT FROM FILE]   Original seed: {metadata.get('seed', 'unknown')}")
+        if 'train_videos' in split_data and 'val_videos' in split_data:
+            print(f"[SPLIT FROM FILE]   Train videos: {len(split_data['train_videos'])} ({split_data['train_videos'][:3]}{'...' if len(split_data['train_videos']) > 3 else ''})")
+            print(f"[SPLIT FROM FILE]   Val videos: {len(split_data['val_videos'])} ({split_data['val_videos']})")
+    
+    return train_pairs, val_pairs
+
+def frame_random_split(dataset_pairs, val_ratio=0.25, seed=42):
+    """
+    传统的帧级随机划分（可能存在视频泄漏，仅用于复现旧结果）
+    
+    Args:
+        dataset_pairs: List of (img_path, mask_path) tuples
+        val_ratio: Validation ratio
+        seed: Random seed
+    
+    Returns:
+        train_pairs, val_pairs: 训练和验证的pairs列表
+    """
+    import torch
+    
+    print(f"[FRAME RANDOM SPLIT] ⚠️  Using frame-level random split (may have video leakage)")
+    print(f"[FRAME RANDOM SPLIT] Total samples: {len(dataset_pairs)}, val_ratio: {val_ratio}, seed: {seed}")
+    
+    # 创建临时索引用于random_split
+    total_size = len(dataset_pairs)
+    val_size = int(total_size * val_ratio)
+    train_size = total_size - val_size
+    
+    indices = list(range(total_size))
+    g = torch.Generator().manual_seed(seed)
+    train_indices, val_indices = torch.utils.data.random_split(indices, [train_size, val_size], generator=g)
+    
+    train_pairs = [dataset_pairs[i] for i in train_indices.indices]
+    val_pairs = [dataset_pairs[i] for i in val_indices.indices]
+    
+    print(f"[FRAME RANDOM SPLIT] ✅ Split completed:")
+    print(f"[FRAME RANDOM SPLIT]   Train samples: {len(train_pairs)}")
+    print(f"[FRAME RANDOM SPLIT]   Val samples: {len(val_pairs)}")
+    
+    return train_pairs, val_pairs
+
+def save_video_aware_split(train_pairs, val_pairs, args, output_mgr):
+    """
+    保存视频级分割结果到YAML文件
+    
+    Args:
+        train_pairs: 训练样本对列表
+        val_pairs: 验证样本对列表  
+        args: 命令行参数
+        output_mgr: 输出管理器
+    """
+    import yaml
+    from datetime import datetime
+    import re
+    
+    try:
+        # 收集训练和验证的图像路径
+        train_img_paths = [pair[0] for pair in train_pairs]
+        val_img_paths = [pair[0] for pair in val_pairs]
+        
+        # 提取视频信息
+        video_pattern = re.compile(r"(video\d+)")
+        train_videos = set()
+        val_videos = set()
+        
+        for img_path in train_img_paths:
+            match = video_pattern.search(img_path)
+            if match:
+                train_videos.add(match.group(1))
+        
+        for img_path in val_img_paths:
+            match = video_pattern.search(img_path)
+            if match:
+                val_videos.add(match.group(1))
+        
+        # 构建保存数据
+        split_data = {
+            'train': train_img_paths,
+            'val': val_img_paths,
+            'train_videos': sorted(list(train_videos)),
+            'val_videos': sorted(list(val_videos)),
+            'metadata': {
+                'split_method': 'video_aware',
+                'seed': 42,
+                'val_ratio': args.val_ratio,
+                'total_samples': len(train_pairs) + len(val_pairs),
+                'train_samples': len(train_pairs),
+                'val_samples': len(val_pairs),
+                'train_video_count': len(train_videos),
+                'val_video_count': len(val_videos),
+                'created_at': datetime.now().isoformat(),
+                'experiment_name': getattr(args, 'evidence_experiment_name', 'unnamed'),
+                'model': args.model,
+                'img_size': args.img_size
+            }
+        }
+        
+        # 保存到outputs目录下的splits子目录
+        splits_dir = os.path.join(output_mgr.get_run_dir(), "splits")
+        os.makedirs(splits_dir, exist_ok=True)
+        
+        split_filename = f"video_aware_split_{getattr(args, 'evidence_experiment_name', 'exp')}.yaml"
+        split_path = os.path.join(splits_dir, split_filename)
+        
+        with open(split_path, 'w') as f:
+            yaml.dump(split_data, f, default_flow_style=False, indent=2)
+        
+        print(f"💾 Video-aware split saved to: {split_path}")
+        print(f"   📁 {len(train_videos)} train videos, {len(val_videos)} val videos")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to save split: {e}")
 
 # compute class weights
 def compute_class_weights(dataset, num_classes, ignore_index=255):
@@ -554,7 +855,7 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
     
     # Initialize components
     evaluator = Evaluator(device=device)
-    distill_visualizer = DistillationVisualizer(output_mgr.get_viz_dir(), device)
+    distill_visualizer = DistillationVisualizer(output_mgr.get_vis_dir(), device)
     visualizer = Visualizer()
     
     print(f"📊 Experiment: {experiment_name}")
@@ -653,7 +954,7 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
     
     print("\n" + "="*60)
     print("✅ KD EVIDENCE PACKAGE GENERATION COMPLETE")
-    print(f"📁 All files saved in: {output_mgr.get_viz_dir()}")
+    print(f"📁 All files saved in: {output_mgr.get_vis_dir()}")
     print("="*60)
     
     return package_paths
@@ -865,18 +1166,178 @@ def main():
         if not args.binary and len(valid_classes) > args.num_classes:
             print(f"[WARN] [HEALTH CHECK] Warning: 发现 {len(valid_classes)} 个有效类别，但 num_classes={args.num_classes}")
 
-    # split ratio
-    val_ratio  = args.val_ratio
-    val_size   = int(len(full_dataset) * val_ratio)
-    train_size = len(full_dataset) - val_size
+    # 🚨 CRITICAL: Configurable data split strategy to prevent video-level leakage
+    print("=" * 60)
+    print(f"🎬 APPLYING DATA SPLIT STRATEGY: {args.split_strategy.upper()}")
+    print("=" * 60)
+    
+    # 获取数据集的原始pairs用于划分
+    dataset_pairs = full_dataset.pairs  # [(img_path, mask_path), ...]
+    val_ratio = args.val_ratio
+    seed = 42  # 保持固定种子确保可重复性
+    
+    # 根据策略选择不同的划分方法
+    if args.split_strategy == "from_file":
+        # 优先：从指定文件加载分割（用于复现Teacher等）
+        if not args.split_file:
+            raise ValueError("--split_strategy=from_file requires --split_file argument")
+        train_pairs, val_pairs = load_split_from_file(args.split_file, dataset_pairs)
+        
+    elif args.split_strategy == "video_aware":
+        # 推荐：视频级划分避免泄漏
+        train_pairs, val_pairs = video_aware_train_val_split(
+            dataset_pairs, val_ratio=val_ratio, seed=seed
+        )
+        
+    elif args.split_strategy == "frame_random":
+        # 兼容：帧级随机划分（可能有泄漏，仅用于复现旧结果）
+        train_pairs, val_pairs = frame_random_split(
+            dataset_pairs, val_ratio=val_ratio, seed=seed
+        )
+        
+    else:
+        raise ValueError(f"Unknown split_strategy: {args.split_strategy}")
+    
+    # 创建新的数据集实例用于训练和验证
+    # 训练数据集 - 带增强
+    train_dataset = SegDatasetMin(
+        args.data_root, dtype="train", img_size=args.img_size,
+        **dataset_config
+    )
+    train_dataset.pairs = train_pairs  # 覆盖为训练pairs
+    
+    # 验证数据集 - 不带增强，显式设置为val模式
+    val_dataset_config = dataset_config.copy()
+    val_dataset = SegDatasetMin(
+        args.data_root, dtype="val", img_size=args.img_size,
+        **val_dataset_config
+    )
+    val_dataset.pairs = val_pairs  # 覆盖为验证pairs
+    
+    # 显式关闭验证集的数据增强（如果数据集支持）
+    if hasattr(val_dataset, 'augment'):
+        val_dataset.augment = False
+        print(f"[DATASET] Validation augmentation disabled")
 
-    # create datasets with random split and seed
-    seed = 42
-    train_ds, val_ds = torch.utils.data.random_split(full_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed))
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
-    print(f"Dataset: Train={len(train_ds)}, Val={len(val_ds)}")
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+    val_loader   = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    
+    print(f"✅ Data Split Complete ({args.split_strategy}):")
+    print(f"   Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
+    print(f"   Actual split ratio: {len(val_dataset)/(len(train_dataset)+len(val_dataset)):.3f}")
+    
+    # 如果是视频级分割，显示视频分布信息
+    # 显示视频分布统计（适用于所有分割策略）
+    try:
+        # 统计训练和验证集中的视频
+        import re
+        video_pattern = re.compile(r"(video\d+)")
+        train_videos = set()
+        val_videos = set()
+        
+        # 从数据集中获取文件路径统计视频
+        for i in range(len(train_dataset)):
+            # 尝试多种方式获取图像路径
+            img_path = None
+            if hasattr(train_dataset, 'img_files'):
+                img_path = train_dataset.img_files[i]
+            elif hasattr(train_dataset, 'all_file_paths'):
+                img_path = train_dataset.all_file_paths[i]
+            elif hasattr(train_dataset, 'dataset') and hasattr(train_dataset.dataset, 'img_files'):
+                # 处理Subset情况
+                actual_idx = train_dataset.indices[i]
+                img_path = train_dataset.dataset.img_files[actual_idx]
+            elif hasattr(train_dataset, 'dataset') and hasattr(train_dataset.dataset, 'all_file_paths'):
+                # 处理Subset情况
+                actual_idx = train_dataset.indices[i]
+                img_path = train_dataset.dataset.all_file_paths[actual_idx]
+            
+            if img_path:
+                match = video_pattern.search(str(img_path))
+                if match:
+                    train_videos.add(match.group(1))
+        
+        for i in range(len(val_dataset)):
+            # 尝试多种方式获取图像路径
+            img_path = None
+            if hasattr(val_dataset, 'img_files'):
+                img_path = val_dataset.img_files[i]
+            elif hasattr(val_dataset, 'all_file_paths'):
+                img_path = val_dataset.all_file_paths[i]
+            elif hasattr(val_dataset, 'dataset') and hasattr(val_dataset.dataset, 'img_files'):
+                # 处理Subset情况
+                actual_idx = val_dataset.indices[i]
+                img_path = val_dataset.dataset.img_files[actual_idx]
+            elif hasattr(val_dataset, 'dataset') and hasattr(val_dataset.dataset, 'all_file_paths'):
+                # 处理Subset情况
+                actual_idx = val_dataset.indices[i]
+                img_path = val_dataset.dataset.all_file_paths[actual_idx]
+            
+            if img_path:
+                match = video_pattern.search(str(img_path))
+                if match:
+                    val_videos.add(match.group(1))
+        
+        if train_videos or val_videos:
+            print(f"   📹 Video distribution:")
+            if train_videos:
+                print(f"      Train videos: {len(train_videos)} ({sorted(list(train_videos))[:3]}{'...' if len(train_videos) > 3 else ''})")
+            if val_videos:
+                print(f"      Val videos: {len(val_videos)} ({sorted(list(val_videos))})")
+            if train_videos and val_videos:
+                overlap = train_videos & val_videos
+                print(f"      Video overlap: {len(overlap)} {'(should be 0)' if args.split_strategy == 'video_aware' else '(expected for frame-level split)'}")
+                if overlap and len(overlap) <= 5:
+                    print(f"         Overlapping videos: {sorted(list(overlap))}")
+        else:
+            print(f"   📹 Video information not available from dataset structure")
+    except Exception as e:
+        print(f"   ⚠️ Video statistics unavailable: {e}")
+    
+    # 记录关键配置信息用于实验追踪
+    config_summary = {
+        "model_arch": args.model,
+        "img_size": args.img_size,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "augment": args.augment,
+        "flip_prob": args.flip_prob if args.augment else None,
+        "rotation_degree": args.rotation_degree if args.augment else None,
+        "apply_fov_mask": args.apply_fov_mask,
+        "classification_scheme": args.classification_scheme,
+        "split_strategy": args.split_strategy,
+        "split_file": args.split_file if args.split_strategy == "from_file" else None,
+        "val_ratio": args.val_ratio,
+        "seed": 42,
+        "optimizer": args.optimizer,
+        "scheduler": args.scheduler,
+        "num_classes": args.num_classes
+    }
+    
+    # 蒸馏相关配置
+    if args.enable_distillation:
+        config_summary.update({
+            "distillation": True,
+            "teacher_model": args.teacher_model,
+            "student_model": args.student_model,
+            "distill_temperature": args.distill_temperature,
+            "distill_alpha": args.distill_alpha,
+            "distill_beta": args.distill_beta
+        })
+    else:
+        config_summary["distillation"] = False
+    
+    print(f"\n📋 Experiment Configuration Summary:")
+    for key, value in config_summary.items():
+        if value is not None:
+            print(f"   {key}: {value}")
+    
+    # 保存分割结果到文件（用于重现和分析）
+    if getattr(args, 'save_split', True):
+        save_video_aware_split(train_pairs, val_pairs, args, output_mgr)
+    
+    print("=" * 60)
 
     # Model 和 蒸馏设置
     if args.enable_distillation:

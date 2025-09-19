@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-KD Evidence Package Runner - Simplified Version
-Automated script to run three experimental configurations for KD evidence generation
+KD Evidence Package Runner
+Automated script to run three experimental configurations for comprehensive KD evidence generation
+
+Experiments:
+1. S-Equal: Student baseline with equal budget (video-aware split)
+2. S-Long: Student with 3x training budget (video-aware split)
+3. KD-Student: Knowledge distillation with video-aware split
 
 Usage:
     python run_kd_evidence_experiments.py --data_root /path/to/data [--quick_test]
+    python run_kd_evidence_experiments.py --data_root /path/to/data --only kd_student
 """
 
 import os
@@ -51,7 +57,8 @@ def main():
                        help="Root directory containing the dataset")
     parser.add_argument("--quick_test", action="store_true",
                        help="Run quick test with reduced epochs")
-    parser.add_argument("--only", type=str, choices=["s_equal", "kd_student", "s_long"],
+    parser.add_argument("--only", type=str, 
+                       choices=["s_equal", "kd_student", "s_long"],
                        help="Run only specific experiment")
     
     args = parser.parse_args()
@@ -59,8 +66,8 @@ def main():
     # Configuration files (using existing ones)
     configs = {
         "S-Equal": "configs/experiments/s_equal_config.yaml",
-        "KD-Student": "configs/experiments/kd_student_config.yaml", 
-        "S-Long": "configs/experiments/s_long_config.yaml"
+        "S-Long": "configs/experiments/s_long_config.yaml",
+        "KD-Student": "configs/experiments/kd_student_config.yaml"
     }
     
     # Check config files exist
@@ -78,7 +85,11 @@ def main():
     experiments_to_run = configs.items()
     
     if args.only:
-        key_map = {"s_equal": "S-Equal", "kd_student": "KD-Student", "s_long": "S-Long"}
+        key_map = {
+            "s_equal": "S-Equal", 
+            "s_long": "S-Long",
+            "kd_student": "KD-Student"
+        }
         exp_name = key_map[args.only]
         experiments_to_run = [(exp_name, configs[exp_name])]
     

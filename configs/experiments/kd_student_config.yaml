@@ -3,17 +3,21 @@
 
 # === 基础训练配置 ===
 epochs: 20
-batch_size: 4
-lr: 0.0001
-img_size: 256
+batch_size: 6  # 与Teacher配置对齐，确保KD兼容性
+lr: 0.0005  # 与Teacher配置对齐，确保KD兼容性
+img_size: 384  # 与Teacher配置对齐，确保KD兼容性
 num_workers: 0
 num_classes: 3
 
 # === 数据配置 ===
 split: "train"
 binary: false
-val_ratio: 0.2
-monitor_interval: 10
+val_ratio: 0.25  # 与Teacher配置对齐
+monitor_interval: 5  # 与Teacher配置对齐
+
+# === 数据分割策略 ===
+split_strategy: "from_file"  # 使用Teacher的原始分割确保一致性
+split_file: "splits/teacher_frame_split.yaml"  # Teacher训练时的分割文件
 
 # === 分类配置 ===
 classification_scheme: "3class_org"
@@ -34,15 +38,15 @@ distill_feature_weight: 0.1
 model: "adaptive_unet"  # 实际训练的是Student模型
 
 # === 训练策略 ===
-stage: "offline"
+stage: "auto"  # 使用auto支持Teacher(offline模型)+Student(online模型)的KD组合
 optimizer: "adamw"
-weight_decay: 0.0001
+weight_decay: 0.001  # 与Teacher配置对齐
 scheduler: "cosine"
 
 # === 数据增强 ===
 augment: true
-flip_prob: 0.5
-rotation_degree: 10
+flip_prob: 0.6  # 与Teacher配置对齐
+rotation_degree: 25  # 与Teacher配置对齐
 
 # === FOV处理 ===
 apply_fov_mask: true  # 是否应用视野遮罩去除黑边
@@ -50,12 +54,16 @@ apply_fov_mask: true  # 是否应用视野遮罩去除黑边
 # === 监控和可视化 ===
 enable_gpu_monitor: true
 save_viz: true
-viz_samples: 6
+viz_samples: 12  # 与Teacher配置对齐
 
 # === 保存策略 ===
 save_interval: 5
 val_interval: 1
 save_best_only: true
+
+# === 早停配置 ===
+early_stopping: true  # 与Teacher配置对齐
+patience: 10  # 与Teacher配置对齐
 
 # === Evidence Package System ===
 generate_evidence_package: true

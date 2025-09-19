@@ -215,6 +215,10 @@ checkpoints/
 logs/
 outputs/
 
+# splits/ 文件夹：保留目录结构但忽略具体分割文件
+splits/*
+!splits/.gitkeep
+
 # 模型/权重/导出产物
 *.pth
 *.ckpt
@@ -255,3 +259,6 @@ palette_anomalies.csv
 test_fov_integration.py
 docs/FOV_Integration_Summary.md
 docs/KD_Evidence_Package_System.md
+test_resume_logic.py
+docs/Video_Aware_Data_Splitting_Summary.md
+configs/experiments/test_split_strategies.yaml
