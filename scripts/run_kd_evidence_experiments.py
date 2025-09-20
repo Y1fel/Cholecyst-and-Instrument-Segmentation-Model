@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-KD Evidence Package Runner
+KD Evidence Package Runner (Updated for New Configs)
 Automated script to run three experimental configurations for comprehensive KD evidence generation
 
-Experiments:
-1. S-Equal: Student baseline with equal budget (video-aware split)
-2. S-Long: Student with 3x training budget (video-aware split)
-3. KD-Student: Knowledge distillation with video-aware split
+Experiments (using improved configurations):
+1. S-Equal: Student baseline with equal budget (20 epochs, video-aware split, combined loss)
+2. S-Long: Student with 3x training budget (60 epochs, video-aware split, combined loss)
+3. KD-Student: Knowledge distillation (30 epochs, video-aware split, T=5.0, α=0.55)
+
+New Features:
+- Video-aware data splitting for all experiments
+- Combined CE+Dice loss (dice_weight=0.4)
+- Auto class weighting
+- Improved early stopping with mIoU metric
+- Enhanced evidence package generation
 
 Usage:
-    python run_kd_evidence_experiments.py --data_root /path/to/data [--quick_test]
-    python run_kd_evidence_experiments.py --data_root /path/to/data --only kd_student
+    python scripts/run_kd_evidence_experiments.py --data_root data/seg8k [--quick_test]
+    python scripts/run_kd_evidence_experiments.py --data_root data/seg8k --only kd_student
 """
 
 import os
@@ -63,11 +70,11 @@ def main():
     
     args = parser.parse_args()
     
-    # Configuration files (using existing ones)
+    # Configuration files (using new improved configs)
     configs = {
-        "S-Equal": "configs/experiments/s_equal_config.yaml",
-        "S-Long": "configs/experiments/s_long_config.yaml",
-        "KD-Student": "configs/experiments/kd_student_config.yaml"
+        "S-Equal": "configs/experiments/new - s_equal_config.yaml",
+        "S-Long": "configs/experiments/new - s_long_config.yaml",
+        "KD-Student": "configs/experiments/new - kd_student_config.yaml"
     }
     
     # Check config files exist

@@ -37,6 +37,17 @@ except ImportError:
     DISTILLATION_AVAILABLE = False
     print("WARNING: Distillation module not available")
 
+# 高级损失函数导入
+try:
+    from utils.composite_losses import (
+        CombinedLoss, DiceLoss, FocalLoss, LabelSmoothingCrossEntropy,
+        compute_auto_class_weights, create_loss_function
+    )
+    COMPOSITE_LOSSES_AVAILABLE = True
+except ImportError:
+    COMPOSITE_LOSSES_AVAILABLE = False
+    print("WARNING: Composite losses module not available")
+
 # process arguments
 def parse_args():
     """参数配置 - 可根据不同模型需求调整"""
@@ -141,10 +152,35 @@ def parse_args():
     # 验证和保存
     p.add_argument("--val_interval", type=int, default=1, help="Validation interval (epochs)")
     p.add_argument("--save_interval", type=int, default=5, help="Checkpoint save interval (epochs)")
+    p.add_argument("--loss_threshold", type=float, default=0.02, 
+                   help="Loss improvement threshold for hybrid evaluation (default: 0.02)")
+    p.add_argument("--loss_degradation_threshold", type=float, default=0.05,
+                   help="Loss degradation threshold - if loss degrades more than this, ignore mIoU improvements (default: 0.05)")
 
     # early stopping
     p.add_argument("--early_stopping", action='store_true', help="Enable early stopping")
     p.add_argument("--patience", type=int, default=5, help="Patience for early stopping")
+    p.add_argument("--early_stopping_metric", type=str, default="loss", 
+                   choices=["loss", "miou"], help="Metric for early stopping: loss (minimize) or miou (maximize)")
+
+    # Advanced Loss Functions
+    p.add_argument("--loss_type", type=str, default="ce", 
+                   choices=["ce", "focal", "dice", "combined", "label_smoothing"],
+                   help="Loss function type")
+    p.add_argument("--dice_weight", type=float, default=0.0, 
+                   help="Dice loss weight in combined loss (0.0 = pure CE, 0.5 = balanced)")
+    p.add_argument("--use_focal_loss", action='store_true', 
+                   help="Use Focal Loss to handle class imbalance")
+    p.add_argument("--focal_alpha", type=float, default=1.0, 
+                   help="Focal loss alpha parameter (class balancing)")
+    p.add_argument("--focal_gamma", type=float, default=2.0, 
+                   help="Focal loss gamma parameter (focusing)")
+    p.add_argument("--label_smoothing", type=float, default=0.0,
+                   help="Label smoothing factor (0.0 = no smoothing, 0.1 = 10% smoothing)")
+    p.add_argument("--auto_class_weights", action='store_true',
+                   help="Automatically compute class weights from dataset")
+    p.add_argument("--class_weight_sample_ratio", type=float, default=0.1,
+                   help="Sampling ratio for computing class weights (0.1 = 10% of dataset)")
 
     p.add_argument("--mode", choices=["standard", "kd"], default="standard",
                     help="standard: 仅GT训练Teacher；kd: Teacher+Student知识蒸馏")
@@ -320,6 +356,16 @@ def get_parser_default(param_name):
         'augment': False,
         'debug': False,
         'save_best_only': True,
+        # 添加高级损失相关默认值
+        'loss_type': 'ce',
+        'dice_weight': 0.0,
+        'use_focal_loss': False,
+        'focal_alpha': 1.0,
+        'focal_gamma': 2.0,
+        'label_smoothing': 0.0,
+        'auto_class_weights': False,
+        'class_weight_sample_ratio': 0.1,
+        'early_stopping_metric': 'loss',
     }
     
     return defaults.get(param_name, None)
@@ -680,6 +726,101 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1-pt)**self.gamma * ce_loss
         return focal_loss.mean()
+
+
+def create_advanced_loss_function(args, dataset, device):
+    """
+    创建高级损失函数 - 支持多种损失类型和自动权重
+    """
+    print(f"=== Creating Advanced Loss Function ===")
+    
+    # 处理类别权重
+    class_weights = None
+    if args.auto_class_weights and COMPOSITE_LOSSES_AVAILABLE:
+        print("Computing automatic class weights...")
+        class_weights = compute_auto_class_weights(
+            dataset, 
+            args.num_classes, 
+            ignore_index=255,
+            sample_ratio=args.class_weight_sample_ratio
+        ).to(device)
+    elif not args.auto_class_weights:
+        # 使用原有的类别权重计算方法作为fallback
+        print("Computing class weights using legacy method...")
+        class_weights = compute_class_weights(dataset, args.num_classes, ignore_index=255).to(device)
+    
+    # 确定损失函数类型
+    loss_type = "ce"  # 默认
+    if args.dice_weight > 0:
+        loss_type = "combined"
+    elif args.use_focal_loss:
+        loss_type = "focal"  
+    elif args.label_smoothing > 0:
+        loss_type = "label_smoothing"
+    elif hasattr(args, 'loss_type'):
+        loss_type = args.loss_type
+    
+    print(f"Using loss type: {loss_type}")
+    if class_weights is not None:
+        print(f"Class weights: {class_weights}")
+    
+    # 创建损失函数
+    if COMPOSITE_LOSSES_AVAILABLE and loss_type != "ce":
+        # 使用高级损失函数
+        loss_config = {
+            'loss_type': loss_type,
+            'dice_weight': getattr(args, 'dice_weight', 0.0),
+            'focal_alpha': getattr(args, 'focal_alpha', 1.0),
+            'focal_gamma': getattr(args, 'focal_gamma', 2.0),
+            'label_smoothing': getattr(args, 'label_smoothing', 0.0),
+            'ignore_index': 255,
+            'class_weights': class_weights.cpu().numpy().tolist() if class_weights is not None else None,
+            'auto_class_weights': False  # 已经计算过了
+        }
+        
+        if loss_type == "combined":
+            print(f"Using Combined Loss (CE + Dice) with dice_weight={args.dice_weight}")
+            criterion = CombinedLoss(
+                dice_weight=args.dice_weight,
+                class_weights=class_weights,
+                ignore_index=255,
+                use_focal=args.use_focal_loss,
+                focal_alpha=args.focal_alpha,
+                focal_gamma=args.focal_gamma
+            )
+        elif loss_type == "focal":
+            print(f"Using Focal Loss with alpha={args.focal_alpha}, gamma={args.focal_gamma}")
+            criterion = FocalLoss(
+                alpha=args.focal_alpha,
+                gamma=args.focal_gamma,
+                ignore_index=255,
+                class_weights=class_weights
+            )
+        elif loss_type == "label_smoothing":
+            print(f"Using Label Smoothing CrossEntropy with smoothing={args.label_smoothing}")
+            criterion = LabelSmoothingCrossEntropy(
+                smoothing=args.label_smoothing,
+                class_weights=class_weights,
+                ignore_index=255
+            )
+        elif loss_type == "dice":
+            print("Using pure Dice Loss")
+            criterion = DiceLoss(ignore_index=255)
+        else:
+            # Fallback to standard CE
+            print("Fallback to standard CrossEntropy Loss")
+            criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+    else:
+        # 使用标准损失函数或原有的Focal Loss
+        if args.use_focal_loss:
+            print(f"Using legacy Focal Loss with alpha={args.focal_alpha}, gamma={args.focal_gamma}")
+            criterion = FocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma, ignore_index=255)
+        else:
+            print("Using standard CrossEntropy Loss")
+            criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+    
+    print(f"Loss function created successfully: {type(criterion).__name__}")
+    return criterion
     
 # build optimizer
 def create_optimizer(model, args):
@@ -1465,18 +1606,12 @@ def main():
             model = build_model(args.model, num_classes=1, in_ch=3, stage=args.stage).to(device)
             criterion = nn.BCEWithLogitsLoss()  # 二分类用BCE
         else:
-            # 多分类：模型输出num_classes个通道，用于CrossEntropyLoss  
+            # 多分类：模型输出num_classes个通道，用于高级损失函数
             model = build_model(args.model, num_classes=args.num_classes, in_ch=3, stage=args.stage).to(device)
             
-            # 计算类别权重以处理类别不平衡
-            print("Computing class weights to handle class imbalance...")
-            class_weights = compute_class_weights(full_dataset, args.num_classes, ignore_index=255)
-            class_weights = class_weights.to(device)
-            print(f"Class weights: {class_weights}")
+            # 智能损失函数选择
+            criterion = create_advanced_loss_function(args, full_dataset, device)
             
-            # 使用加权CrossEntropyLoss来处理类别不平衡（推荐方案）
-            criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
-            # criterion = FocalLoss(alpha=1.0, gamma=2.0, ignore_index=255)  # 备选：Focal Loss
         teacher_model = None  # 标准模式下没有Teacher模型
 
     # Optimizer and Scheduler
@@ -1484,6 +1619,7 @@ def main():
     scheduler = create_scheduler(optimizer, args)
     
     best_val_loss = float("inf")
+    best_miou = 0.0  # mIoU越大越好
     patience_counter = 0  # Initialize early stopping counter
 
     print("=" * 80) # Training start
@@ -1574,30 +1710,51 @@ def main():
             else:
                 scheduler.step()
 
-        # Early stopping logic (before saving)
+        # Early stopping logic (before saving) - 支持多种指标
         current_val_loss = val_metrics['val_loss']
-        is_improvement = current_val_loss < best_val_loss
+        current_miou = val_metrics.get('miou', 0.0)
+        
+        # 根据选择的指标判断是否改善
+        if args.early_stopping_metric == "loss":
+            is_improvement = current_val_loss < best_val_loss
+            monitor_value = current_val_loss
+            best_monitor_value = best_val_loss
+            print(f"   Early stopping monitoring: loss = {monitor_value:.4f} (best: {best_monitor_value:.4f})")
+        elif args.early_stopping_metric == "miou":
+            is_improvement = current_miou > best_miou
+            monitor_value = current_miou
+            best_monitor_value = best_miou
+            print(f"   Early stopping monitoring: mIoU = {monitor_value:.4f} (best: {best_monitor_value:.4f})")
+        else:
+            # Fallback to loss
+            is_improvement = current_val_loss < best_val_loss
+            monitor_value = current_val_loss
+            best_monitor_value = best_val_loss
         
         if args.early_stopping:
             if is_improvement:
                 patience_counter = 0
+                print(f"   ✓ Improvement detected, resetting patience counter")
             else:
                 patience_counter += 1
+                print(f"   ✗ No improvement for {patience_counter}/{args.patience} epochs")
                 if patience_counter >= args.patience:
-                    print(f"Early stopping triggered after {args.patience} epochs without improvement")
+                    print(f"\n🛑 Early stopping triggered! No improvement in {args.early_stopping_metric} for {args.patience} epochs")
+                    print(f"   Final {args.early_stopping_metric}: {monitor_value:.4f} (best: {best_monitor_value:.4f})")
                     break
 
         # save checkpoints using the unified method
         if args.enable_distillation:
             # 知识蒸馏模式：只保存Student模型（Teacher是冻结的，无需保存）
-            # 保存Student模型（主要训练模型）
-            saved_path, best_val_loss = output_mgr.save_checkpoint_if_needed(
+            # 保存Student模型（主要训练模型） - 使用混合评估策略
+            saved_path, best_val_loss, best_miou = output_mgr.save_checkpoint_with_hybrid_evaluation(
                 model=student_model,
                 epoch=epoch + 1,
                 metrics=val_metrics,
-                current_best_metric=best_val_loss,
-                metric_name='val_loss',
-                minimize=True,
+                current_best_loss=best_val_loss,
+                current_best_miou=best_miou,
+                loss_threshold=args.loss_threshold,
+                loss_degradation_threshold=args.loss_degradation_threshold,
                 save_interval=args.save_interval,
                 model_suffix="student"
             )
@@ -1613,14 +1770,15 @@ def main():
                 )
                 print(f"SAVED: Teacher reference model (frozen): {os.path.basename(teacher_reference_path)}")
         else:
-            # 标准训练模式：只保存单个模型
-            saved_path, best_val_loss = output_mgr.save_checkpoint_if_needed(
+            # 标准训练模式：只保存单个模型 - 使用混合评估策略
+            saved_path, best_val_loss, best_miou = output_mgr.save_checkpoint_with_hybrid_evaluation(
                 model=model,
                 epoch=epoch + 1,
                 metrics=val_metrics,
-                current_best_metric=best_val_loss,
-                metric_name='val_loss',
-                minimize=True,
+                current_best_loss=best_val_loss,
+                current_best_miou=best_miou,
+                loss_threshold=args.loss_threshold,
+                loss_degradation_threshold=args.loss_degradation_threshold,
                 save_interval=args.save_interval
             )
 

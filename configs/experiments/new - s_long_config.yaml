@@ -1,23 +1,22 @@
-# S-Equal: Student-only 等预算基线实验
-# 20 epochs, adaptive_unet, 无KD
+# S-Long: Student-only 长训练实验
+# 60 epochs (3x预算), adaptive_unet, 无KD
 
 # === 基础训练配置 ===
-epochs: 20
-batch_size: 6  # 与Teacher配置对齐
-lr: 0.0005  # 与Teacher配置对齐
-img_size: 384  # 与Teacher配置对齐
+epochs: 60  # 3倍训练预算
+batch_size: 6 
+lr: 0.0005  
+img_size: 384  
 num_workers: 0
 num_classes: 3
 
 # === 数据配置 ===
 split: "train"
 binary: false
-val_ratio: 0.25  # 与Teacher配置对齐
+val_ratio: 0.2  # video_aware 模式推荐比例
 monitor_interval: 5  # 与Teacher配置对齐
 
 # === 数据分割策略 ===
-split_strategy: "from_file"  # 使用Teacher的原始分割确保一致性
-split_file: "splits/teacher_frame_split.yaml"  # Teacher训练时的分割文件
+split_strategy: "video_aware"  # 使用video-aware分割策略
 
 # === 分类配置 ===
 classification_scheme: "3class_org"
@@ -29,7 +28,7 @@ enable_distillation: false  # 关键：无KD
 model: "adaptive_unet"  # Student模型
 
 # === 训练策略 ===
-stage: "auto"  # 使用auto让系统自动判断
+stage: "auto"  # 使用auto避免模型分类冲突
 optimizer: "adamw"
 weight_decay: 0.001  # 与Teacher配置对齐
 scheduler: "cosine"
@@ -48,7 +47,7 @@ save_viz: true
 viz_samples: 12  # 与Teacher配置对齐
 
 # === 保存策略 ===
-save_interval: 5
+save_interval: 10  # 更大的保存间隔（因为epoch多）
 val_interval: 1
 save_best_only: true
 loss_threshold: 0.015  # Loss改善阈值：小于此值时使用mIoU评估
@@ -57,12 +56,25 @@ loss_degradation_threshold: 0.05  # Loss恶化阈值：超过此值时即使mIoU
 # === 早停配置 ===
 early_stopping: true  # 与Teacher配置对齐
 patience: 10  # 与Teacher配置对齐
+early_stopping_metric: "miou"  # 使用 mIoU 作为早停指标（与new-kd对齐）
+
+# === 高级损失函数配置 ===
+loss_type: "combined"  # CE+Dice 组合损失（与new-kd对齐）
+dice_weight: 0.4  # Dice损失权重（与new-kd对齐）
+ce_weight: 1.0  # 交叉熵损失权重
+focal_alpha: 1.0  # Focal损失平衡参数（未使用但保留）
+focal_gamma: 2.0  # Focal损失聚焦参数（未使用但保留）
+label_smoothing: 0.0  # 标签平滑参数（0表示不使用）
+auto_class_weights: true  # 自动计算类别权重（与new-kd对齐）
+class_weights: [1.0, 1.0, 1.0]  # 手动类别权重（被auto覆盖）
+loss_reduction: "mean"  # 损失缩减方式
+ignore_index: -100  # 忽略的索引值
 
 # === Evidence Package System ===
 generate_evidence_package: true
 evidence_samples: 1000
-evidence_experiment_name: "S_Equal"
+evidence_experiment_name: "S_Long"
 
 # === 实验标识 ===
-experiment_regime: "S-Equal"
-experiment_notes: "Equal-budget baseline"
+experiment_regime: "S-Long-VideoAware"
+experiment_notes: "3× steps 'long-train' with video-aware split"

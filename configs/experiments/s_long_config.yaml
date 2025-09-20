@@ -51,6 +51,8 @@ viz_samples: 12  # 与Teacher配置对齐
 save_interval: 10  # 更大的保存间隔（因为epoch多）
 val_interval: 1
 save_best_only: true
+loss_threshold: 0.015  # Loss改善阈值：小于此值时使用mIoU评估
+loss_degradation_threshold: 0.05  # Loss恶化阈值：超过此值时即使mIoU提升也不保存
 
 # === 早停配置 ===
 early_stopping: true  # 与Teacher配置对齐

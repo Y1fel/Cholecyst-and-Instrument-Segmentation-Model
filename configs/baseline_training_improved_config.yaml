@@ -1,0 +1,82 @@
+# Baseline训练改进配置文件 (UNet-Min)
+# 用于与Teacher(UNet++)进行对比的基线模型
+
+# === 基础训练配置 ===
+epochs: 20
+batch_size: 6           
+lr: 0.0005              # 适中学习率，与Teacher保持一致
+img_size: 384           # 提高分辨率以获得更精细的分割
+num_workers: 0          
+num_classes: 3          
+
+# === 数据配置 ===
+split: "train"
+binary: false           
+val_ratio: 0.25         # 增加验证集比例，与Teacher保持一致
+monitor_interval: 5     
+
+# === 关键：使用相同的分类方案 ===
+classification_scheme: "3class_org"    
+
+# === 标准训练模式（非蒸馏） ===
+enable_distillation: false
+model: "unet_min"       # 基线模型：轻量级UNet
+
+# === 训练策略 ===
+stage: "offline"        # 与Teacher保持一致，确保训练逻辑完全相同
+
+# === 优化器配置 ===
+optimizer: "adamw"
+sgd_momentum: 0.9       # SGD优化器动量（当使用SGD时）
+weight_decay: 0.001     # 增加正则化
+scheduler: "cosine"
+
+# === 数据增强（增强版） ===
+augment: true
+flip_prob: 0.6
+rotation_degree: 25
+
+# === FOV处理 ===
+apply_fov_mask: true  # 是否应用视野遮罩去除黑边
+
+# === 监控和可视化 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 12         # 增加可视化样本
+
+# === 保存策略 ===
+save_interval: 2        # 更频繁保存
+val_interval: 1
+save_best_only: true
+
+# === 早停配置 ===
+early_stopping: false
+patience: 10
+early_stopping_metric: "loss"  # 早停指标：loss（最小化）
+
+# === 高级损失函数配置 ===
+loss_type: "ce"         # 使用标准CrossEntropy损失
+dice_weight: 0.0        # 无Dice损失权重
+ce_weight: 1.0          # 交叉熵损失权重
+focal_alpha: 1.0        # Focal损失平衡参数（未使用但保留）
+focal_gamma: 2.0        # Focal损失聚焦参数（未使用但保留）
+label_smoothing: 0.0    # 标签平滑参数（0表示不使用）
+auto_class_weights: false  # 不使用自动类别权重
+class_weights: [1.0, 1.0, 1.0]  # 手动类别权重（均等权重）
+loss_reduction: "mean"  # 损失缩减方式
+ignore_index: 255       # 忽略的索引值
+
+# === 数据分割策略 ===
+split_strategy: "video_aware"  # 使用video-aware分割策略，与Teacher保持一致
+
+# === 实验标识 ===
+experiment_regime: "Baseline-UNet-Min"
+experiment_notes: "Baseline model for comparison with Teacher(UNet++)"
+
+# === 备注 ===
+# 主要特点：
+# 1. 轻量级UNet-Min模型（基线对比）
+# 2. 与Teacher相同的训练配置（分辨率、数据增强等）
+# 3. 标准CE损失，无高级损失函数
+# 4. Video-aware数据分割，确保公平对比
+# 5. 用于评估Teacher模型的性能提升幅度
