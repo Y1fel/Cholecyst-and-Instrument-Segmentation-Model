@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """
-KD Evidence Package Runner - Simplified Version
-Automated script to run three experimental configurations for KD evidence generation
+KD Evidence Package Runner (Updated for New Configs)
+Automated script to run three experimental configurations for comprehensive KD evidence generation
+
+Experiments (using improved configurations):
+1. S-Equal: Student baseline with equal budget (20 epochs, video-aware split, combined loss)
+2. S-Long: Student with 3x training budget (60 epochs, video-aware split, combined loss)
+3. KD-Student: Knowledge distillation (30 epochs, video-aware split, T=5.0, α=0.55)
+
+New Features:
+- Video-aware data splitting for all experiments
+- Combined CE+Dice loss (dice_weight=0.4)
+- Auto class weighting
+- Improved early stopping with mIoU metric
+- Enhanced evidence package generation
 
 Usage:
-    python run_kd_evidence_experiments.py --data_root /path/to/data [--quick_test]
+    python scripts/run_kd_evidence_experiments.py --data_root data/seg8k [--quick_test]
+    python scripts/run_kd_evidence_experiments.py --data_root data/seg8k --only kd_student
 """
 
 import os
@@ -51,16 +64,17 @@ def main():
                        help="Root directory containing the dataset")
     parser.add_argument("--quick_test", action="store_true",
                        help="Run quick test with reduced epochs")
-    parser.add_argument("--only", type=str, choices=["s_equal", "kd_student", "s_long"],
+    parser.add_argument("--only", type=str, 
+                       choices=["s_equal", "kd_student", "s_long"],
                        help="Run only specific experiment")
     
     args = parser.parse_args()
     
-    # Configuration files (using existing ones)
+    # Configuration files (using new improved configs)
     configs = {
-        "S-Equal": "configs/experiments/s_equal_config.yaml",
-        "KD-Student": "configs/experiments/kd_student_config.yaml", 
-        "S-Long": "configs/experiments/s_long_config.yaml"
+        "S-Equal": "configs/experiments/new - s_equal_config.yaml",
+        "S-Long": "configs/experiments/new - s_long_config.yaml",
+        "KD-Student": "configs/experiments/new - kd_student_config.yaml"
     }
     
     # Check config files exist
@@ -78,7 +92,11 @@ def main():
     experiments_to_run = configs.items()
     
     if args.only:
-        key_map = {"s_equal": "S-Equal", "kd_student": "KD-Student", "s_long": "S-Long"}
+        key_map = {
+            "s_equal": "S-Equal", 
+            "s_long": "S-Long",
+            "kd_student": "KD-Student"
+        }
         exp_name = key_map[args.only]
         experiments_to_run = [(exp_name, configs[exp_name])]
     

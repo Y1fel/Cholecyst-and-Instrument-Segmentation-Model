@@ -275,7 +275,7 @@ class SegDatasetMin(Dataset):
             # 统计/调试：仅首批样本打印一次
             if index < 3:
                 uniques, counts = np.unique(m, return_counts=True)
-                print(f"[MAP DEBUG] train ids in sample#{index}: {dict(zip(uniques.tolist(), counts.tolist()))}")
+                # print(f"[MAP DEBUG] train ids in sample#{index}: {dict(zip(uniques.tolist(), counts.tolist()))}")
 
             # 最近邻缩放，保持离散标签
             m = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)

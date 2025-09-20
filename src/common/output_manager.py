@@ -189,6 +189,86 @@ class OutputManager:
 
         return saved_path, new_best_metric
 
+    def save_checkpoint_with_hybrid_evaluation(self, model, epoch: int, metrics: Dict,
+                                             current_best_loss: float, current_best_miou: float,
+                                             loss_threshold: float = 0.02, loss_degradation_threshold: float = 0.01,
+                                             save_interval: int = 5, model_suffix: str = "", save_best: bool = True):
+        """
+        混合评估策略保存checkpoint：优先使用loss评估，不合格时使用mIoU评估
+        
+        Args:
+            model: 模型
+            epoch: epoch
+            metrics: 指标字典
+            current_best_loss: 当前最佳loss值
+            current_best_miou: 当前最佳mIoU值
+            loss_threshold: loss改善阈值，小于此值时认为loss评估不合格
+            loss_degradation_threshold: loss恶化阈值，超过此值时即使mIoU提升也不保存
+            save_interval: 常规保存间隔
+            model_suffix: 模型后缀
+            save_best: 是否保存最佳模型
+            
+        Returns:
+            saved_path, new_best_loss, new_best_miou
+        """
+        current_loss = metrics.get('val_loss')
+        current_miou = metrics.get('miou')
+        
+        if current_loss is None:
+            print(f"Warning: 'val_loss' not found in metrics")
+            return self.save_model(model, epoch, metrics, is_best=False, model_suffix=model_suffix), current_best_loss, current_best_miou
+            
+        if current_miou is None:
+            print(f"Warning: 'miou' not found in metrics")
+            return self.save_model(model, epoch, metrics, is_best=False, model_suffix=model_suffix), current_best_loss, current_best_miou
+
+        # 混合评估逻辑
+        is_best = False
+        new_best_loss = current_best_loss
+        new_best_miou = current_best_miou
+        evaluation_reason = ""
+
+        if save_best:
+            # 策略1: 优先使用loss评估
+            loss_improvement = current_best_loss - current_loss
+            if loss_improvement > loss_threshold:
+                # loss改善足够大，使用loss评估
+                is_best = True
+                new_best_loss = current_loss
+                new_best_miou = current_miou  # 同时更新mIoU记录
+                evaluation_reason = f"Loss improved by {loss_improvement:.4f} (>{loss_threshold:.4f})"
+            else:
+                # 策略2: loss改善不足，使用mIoU评估
+                # 但如果loss显著增加，即使mIoU提升也要谨慎
+                if current_miou > current_best_miou:
+                    if loss_improvement >= -loss_degradation_threshold:
+                        # loss没有显著恶化，可以基于mIoU保存
+                        is_best = True
+                        new_best_miou = current_miou
+                        # loss可能有小幅改善，也更新记录
+                        if current_loss < current_best_loss:
+                            new_best_loss = current_loss
+                        evaluation_reason = f"Loss improvement insufficient ({loss_improvement:.4f}<={loss_threshold:.4f}), but mIoU improved: {current_miou:.4f} > {current_best_miou:.4f}"
+                    else:
+                        # loss显著恶化，即使mIoU提升也不保存
+                        evaluation_reason = f"Loss degraded significantly ({loss_improvement:.4f}<-{loss_degradation_threshold:.4f}), ignoring mIoU improvement: {current_miou:.4f} > {current_best_miou:.4f}"
+                else:
+                    evaluation_reason = f"Neither loss nor mIoU improved sufficiently (loss: {loss_improvement:.4f}, mIoU: {current_miou:.4f} <= {current_best_miou:.4f})"
+
+        # 保存模型
+        saved_path = self.save_model(model, epoch, metrics, is_best=is_best, model_suffix=model_suffix)
+
+        if is_best and save_best:
+            print(f"🎯 BEST: New best model at epoch {epoch}")
+            print(f"   📊 Evaluation: {evaluation_reason}")
+            print(f"   📈 Metrics: loss={current_loss:.4f}, mIoU={current_miou:.4f}")
+        elif epoch % save_interval == 0:
+            suffix_info = f" ({model_suffix})" if model_suffix else ""
+            print(f"SAVED: Regular checkpoint{suffix_info} saved at epoch {epoch}")
+            print(f"   📊 {evaluation_reason}")
+
+        return saved_path, new_best_loss, new_best_miou
+
 
     def _update_best_model_record(self, epoch: int, metrics: Dict, model_path: str):
         best_record_path = os.path.join(self.run_dir, "best_model_info.json")

@@ -33,8 +33,8 @@ except ImportError:
     HRNet = None
 
 # 模型分类定义
-OFFLINE_MODELS = ['unet_min', 'unet_plus_plus', 'deeplabv3_plus', 'hrnet']
-ONLINE_MODELS = ['mobile_unet', 'adaptive_unet']
+OFFLINE_MODELS = ['unet_min', 'unet_plus_plus', 'deeplabv3_plus', 'hrnet', 'adaptive_unet']  # 添加adaptive_unet支持offline训练
+ONLINE_MODELS = ['mobile_unet', 'adaptive_unet']  # adaptive_unet同时支持两种阶段
 ALL_MODELS = OFFLINE_MODELS + ONLINE_MODELS
 
 def build_model(

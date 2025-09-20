@@ -54,9 +54,28 @@ debug: false
 early_stopping: true
 patience: 10
 
+# === 高级损失配置 (为兼容性添加，使用默认值保持一致性) ===
+# 注意：这些参数使用默认值，确保与原有训练行为完全一致
+focal_gamma: 2.0          # Focal Loss gamma参数（不启用时无影响）
+dice_weight: 0.0          # Dice Loss权重（0.0 = 只使用CE Loss，保持原有行为）
+ce_weight: 1.0            # CrossEntropy Loss权重
+loss_reduction: "mean"    # 损失缩减方式
+auto_class_weights: false # 不使用自动类别权重，保持原有行为
+class_weights: [1.0, 1.0, 1.0]  # 手动类别权重（均等权重）
+ignore_index: 255        # 忽略的索引值
+early_stopping_metric: "loss"  # 早停监控指标
+
+# === 数据分割策略 (为兼容性添加) ===
+split_strategy: "video_aware"  # 使用video-aware分割策略，与baseline保持一致
+
+# === 实验标识 ===
+experiment_regime: "Teacher-UNet++"
+experiment_notes: "Teacher model(UNet++) for knowledge distillation - compatibility version"
+
 # === 备注 ===
 # 主要改进：
 # 1. 更高分辨率训练（384x384）
 # 2. 增加训练轮数和验证集比例
 # 3. 更强的正则化和数据增强
 # 4. 更频繁的模型保存和监控
+# 5. 【新增】兼容性参数确保与新训练系统的完全兼容
