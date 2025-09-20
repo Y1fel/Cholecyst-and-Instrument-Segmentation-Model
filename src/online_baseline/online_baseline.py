@@ -13,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from collections import deque
 import random
-from mobile_unet1 import MobileUNet
+from mobile_unet import MobileUNet
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from datetime import datetime
