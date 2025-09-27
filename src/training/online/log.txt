@@ -20,7 +20,7 @@ python -m src.training.online.online_universal_v1 --video_root src/dataio/datase
 python -m src.training.online.online_universal_better_video --video_root debug/video01.mp4 --student_model_path debug/distill_unet_plus_plus_to_adaptive_unet_student_best.pth --student_model_name adaptive_unet --student_num_classes 3 --offline_model_path debug/unet_plus_plus_best.pth --offline_model_name unet_plus_plus --offline_num_classes 3 --save_viz --use_amp --img_size 256 --online_steps 200 --save_pred_every_batch --update_mode fixed --update_interval 20 --update_layers bn
 
 # 使用源视频帧率写出、每帧可视化、全程在线学习
-python -m src.training.online.new_v4+miou \
+python -m src.training.online.online_universal_new_v4_improved \
   --video_root debug/video01.mp4 \
   --student_model_path debug/distill_unet_plus_plus_to_adaptive_unet_student_best.pth \
   --student_model_name adaptive_unet \
@@ -29,9 +29,10 @@ python -m src.training.online.new_v4+miou \
   --offline_model_name unet_plus_plus \
   --offline_num_classes 3 \
   --img_size 512 \
-  --online_steps 600 \
+  --online_steps 250 \
   --viz_stride 1 \
   --writer_fps 0 \
+  --save_pseudo_labels \
   --stream_output
 
 # 指定较低写出帧率（拉长成片，如 10 FPS）
