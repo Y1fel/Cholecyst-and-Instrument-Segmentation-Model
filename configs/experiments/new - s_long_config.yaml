@@ -2,11 +2,11 @@
 # 60 epochs (3x预算), adaptive_unet, 无KD
 
 # === 基础训练配置 ===
-epochs: 60  # 3倍训练预算
+epochs: 60  # 2倍训练预算
 batch_size: 6 
 lr: 0.0005  
 img_size: 384  
-num_workers: 0
+num_workers: 4
 num_classes: 3
 
 # === 数据配置 ===
@@ -35,8 +35,8 @@ scheduler: "cosine"
 
 # === 数据增强 ===
 augment: true
-flip_prob: 0.6  # 与Teacher配置对齐
-rotation_degree: 25  # 与Teacher配置对齐
+flip_prob: 0.5
+rotation_degree: 15
 
 # === FOV处理 ===
 apply_fov_mask: true  # 是否应用视野遮罩去除黑边
@@ -47,32 +47,31 @@ save_viz: true
 viz_samples: 12  # 与Teacher配置对齐
 
 # === 保存策略 ===
-save_interval: 10  # 更大的保存间隔（因为epoch多）
+save_interval: 5  # 与KD配置对齐
 val_interval: 1
 save_best_only: true
 loss_threshold: 0.015  # Loss改善阈值：小于此值时使用mIoU评估
 loss_degradation_threshold: 0.05  # Loss恶化阈值：超过此值时即使mIoU提升也不保存
 
 # === 早停配置 ===
-early_stopping: true  # 与Teacher配置对齐
-patience: 10  # 与Teacher配置对齐
-early_stopping_metric: "miou"  # 使用 mIoU 作为早停指标（与new-kd对齐）
+early_stopping: true  # 与KD配置对齐
+patience: 10  # 与KD配置对齐
+early_stopping_metric: "miou"  # 早停判定指标: loss(最小化) 或 miou(最大化)
 
 # === 高级损失函数配置 ===
-loss_type: "combined"  # CE+Dice 组合损失（与new-kd对齐）
-dice_weight: 0.4  # Dice损失权重（与new-kd对齐）
-ce_weight: 1.0  # 交叉熵损失权重
-focal_alpha: 1.0  # Focal损失平衡参数（未使用但保留）
-focal_gamma: 2.0  # Focal损失聚焦参数（未使用但保留）
-label_smoothing: 0.0  # 标签平滑参数（0表示不使用）
-auto_class_weights: true  # 自动计算类别权重（与new-kd对齐）
-class_weights: [1.0, 1.0, 1.0]  # 手动类别权重（被auto覆盖）
-loss_reduction: "mean"  # 损失缩减方式
-ignore_index: -100  # 忽略的索引值
+loss_type: "combined"  # CE+Dice 组合损失（与KD对齐）
+dice_weight: 0.4  # Dice损失权重（与KD对齐）
+use_focal_loss: false  # 是否在combined中使用Focal作为基础损失
+focal_alpha: 1.0  # Focal Loss alpha参数
+focal_gamma: 2.0  # Focal Loss gamma参数
+label_smoothing: 0.0  # 标签平滑参数（S-Long不使用KD的0.05）
+auto_class_weights: true  # 自动计算类别权重（与KD对齐）
+class_weight_sample_ratio: 0.15  # 权重计算采样比例（与KD对齐）
 
-# === Evidence Package System ===
+# === 可视化/证据包 ===
+save_viz: true
+viz_samples: 12
 generate_evidence_package: true
-evidence_samples: 1000
 evidence_experiment_name: "S_Long"
 
 # === 实验标识 ===

@@ -1,235 +1,464 @@
-# Project Structure
+# Project Structure Documentation
 
+## 项目组织架构
 
 ✅ = 已实现  🚧 = 部分实现  📋 = 计划中  🆕 = 最新添加
 
+> **📋 目录状态说明**: `checkpoints/` 和 `logs/` 目录当前为空，仅保留结构。训练时会自动创建相应文件。已移除 `docs/`、`tests/`、`examples/` 目录，相关功能已整合到其他位置。
+
+### 核心目录结构
+
 ```
-Cholecyst-and-Instrument-Segmentation-Model/
-├─ README.md                          # ✅ 项目简介
-├─ LICENSE                            # ✅ 许可证声明
-├─ PROJECT_STRUCTURE.md               # ✅ 项目结构文档（本文件）
-├─ .gitignore                         # ✅ Git忽略文件列表
-├─ monitor_kd_losses.py               # 🆕 知识蒸馏损失监控工具（实时分析训练趋势）
-├─ test_fov_integration.py            # 🆕 FOV集成测试脚本（视野遮罩功能验证）
-├─ palette_anomalies.csv              # 🆕 颜色调色板异常分析结果（数据质量检查）
-│
-├─ configs/                           # ✅ YAML配置文件，统一管理参数（Single Source of Truth）
-│  ├─ universal_template_config.yaml # ✅ 通用多分类训练配置模板
-│  ├─ binary_template_config.yaml    # ✅ 二分类专用配置模板
-│  ├─ teacher_training_config.yaml   # 🆕 教师模型训练配置（基础版）
-│  ├─ teacher_training_improved_config.yaml # 🆕 教师模型改进训练配置（优化参数）
-│  ├─ distillation_improved_config.yaml # 🆕 改进知识蒸馏配置（带优化策略）
-│  ├─ distillation_test_config.yaml  # 🆕 知识蒸馏测试配置（快速验证）
-│  ├─ kd_final_test_config.yaml      # 🆕 KD最终测试配置（完整流程验证）
-│  ├─ fov_test_config.yaml           # 🆕 FOV功能测试配置（视野遮罩测试）
-│  ├─ mapping_example.yaml           # 🆕 映射配置示例（数据标签映射参考）
-│  ├─ offline/                        # ✅ 离线阶段（重模型训练）参数目录
-│  │  └─ baseline_min.yaml           # ✅ 极简配置（可选，不想配也可用命令行）
-│  ├─ online/                         # � 在线阶段（轻量模型与自适应）参数目录（规划中）
-│  │  ├─ default_online.yaml         # 📋 默认在线推理参数（阈值、滑窗大小等）
-│  │  ├─ gating.yaml                 # 📋 多信号权重配置
-│  │  ├─ conservative_update.yaml     # 📋 BN-only / Decoder-lite / Adapter-only配置
-│  │  ├─ buffer_trio.yaml            # 📋 缓冲机制（迟滞、冷却、回滚）
-│  │  └─ escalation.yaml             # 📋 安全模式切换规则
-│  └─ experiments/                    # 🆕 实验配置目录（消融和对比实验）
-│     ├─ kd_student_config.yaml      # 🆕 知识蒸馏学生模型配置
-│     ├─ s_equal_config.yaml         # 🆕 S-Equal基线实验（等预算学生模型）
-│     └─ s_long_config.yaml          # 🆕 S-Long扩展实验（长期训练配置）
-│
+
+```Cholecyst-and-Instrument-Segmentation-Model/
+
+Cholecyst-and-Instrument-Segmentation-Model/├─ README.md                          # ✅ 项目简介
+
+├── src/                           # 核心源代码├─ LICENSE                            # ✅ 许可证声明
+
+│   ├── training/                  # 训练相关模块├─ PROJECT_STRUCTURE.md               # ✅ 项目结构文档（本文件）
+
+│   │   ├── offline/              # 离线训练系统├─ .gitignore                         # ✅ Git忽略文件列表
+
+│   │   ├── online/               # 在线学习系统├─ monitor_kd_losses.py               # 🆕 知识蒸馏损失监控工具（实时分析训练趋势）
+
+│   │   └── resume_manager.py     # 训练恢复管理器├─ test_fov_integration.py            # 🆕 FOV集成测试脚本（视野遮罩功能验证）
+
+│   ├── models/                   # 模型定义├─ palette_anomalies.csv              # 🆕 颜色调色板异常分析结果（数据质量检查）
+
+│   │   ├── baseline/            # 基线模型│
+
+│   │   ├── offline/             # 离线训练专用模型├─ configs/                           # ✅ YAML配置文件，统一管理参数（Single Source of Truth）
+
+│   │   ├── online/              # 在线学习专用模型│  ├─ universal_template_config.yaml # ✅ 通用多分类训练配置模板
+
+│   │   └── model_zoo.py         # 模型工厂│  ├─ binary_template_config.yaml    # ✅ 二分类专用配置模板
+
+│   ├── dataio/                  # 数据输入输出│  ├─ teacher_training_config.yaml   # 🆕 教师模型训练配置（基础版）
+
+│   │   └── datasets/           # 数据集类定义│  ├─ teacher_training_improved_config.yaml # 🆕 教师模型改进训练配置（优化参数）
+
+│   ├── eval/                    # 评估模块│  ├─ distillation_improved_config.yaml # 🆕 改进知识蒸馏配置（带优化策略）
+
+│   ├── viz/                     # 可视化工具│  ├─ distillation_test_config.yaml  # 🆕 知识蒸馏测试配置（快速验证）
+
+│   └── common/                  # 通用工具和常量│  ├─ kd_final_test_config.yaml      # 🆕 KD最终测试配置（完整流程验证）
+
+├── configs/                      # 配置文件│  ├─ fov_test_config.yaml           # 🆕 FOV功能测试配置（视野遮罩测试）
+
+│   ├── offline/                 # 离线训练配置│  ├─ mapping_example.yaml           # 🆕 映射配置示例（数据标签映射参考）
+
+│   ├── online/                  # 在线学习配置│  ├─ offline/                        # ✅ 离线阶段（重模型训练）参数目录
+
+│   └── experiments/             # 实验配置│  │  └─ baseline_min.yaml           # ✅ 极简配置（可选，不想配也可用命令行）
+
+├── scripts/                     # 独立脚本工具│  ├─ online/                         # � 在线阶段（轻量模型与自适应）参数目录（规划中）
+
+├── utils/                       # 工具模块│  │  ├─ default_online.yaml         # 📋 默认在线推理参数（阈值、滑窗大小等）
+
+├── data/                        # 数据存储│  │  ├─ gating.yaml                 # 📋 多信号权重配置
+
+├── outputs/                     # 训练输出│  │  ├─ conservative_update.yaml     # 📋 BN-only / Decoder-lite / Adapter-only配置
+
+├── checkpoints/                 # 模型权重│  │  ├─ buffer_trio.yaml            # 📋 缓冲机制（迟滞、冷却、回滚）
+
+├── logs/                        # 日志文件│  │  └─ escalation.yaml             # 📋 安全模式切换规则
+
+└── splits/                      # 数据分割文件│  └─ experiments/                    # 🆕 实验配置目录（消融和对比实验）
+
+```│     ├─ s_equal_config.yaml         # 🆕 S-Equal基线实验（等预算学生模型）
+
+```
+
 ├─ data/                              # ✅ 数据集元信息或软链接（原数据不放入仓库）
-│  └─ README.md                      # 📋 数据挂载说明
+
+## 详细模块说明│  └─ README.md                      # 📋 数据挂载说明
+
 │
-├─ checkpoints/                       # ✅ 模型权重（离线重模型、蒸馏模型、EMA快照）
+
+### 1. 训练系统 (`src/training/`)├─ checkpoints/                       # ✅ 模型权重存储目录（训练时自动创建文件）
+
 │
-├─ logs/                              # ✅ 日志（tensorboard、JSON、事件追踪）
-│
-├─ outputs/                           # ✅ 推理结果、可视化、表格
-│
-├─ docs/                              # ✅ 文档与图表
-│  └─ diagrams/                      # ✅ Mermaid流程图目录
-│
-├─ scripts/                           # ✅ 命令行脚本（可复现运行）
+
+#### 离线训练模块 (`offline/`)├─ logs/                              # ✅ 日志存储目录（训练时自动创建文件）
+
+- **train_offline_universal.py**: 通用离线训练主程序│
+
+  - 支持多种模型架构 (UNet, UNet++, Adaptive UNet)├─ outputs/                           # ✅ 推理结果、可视化、表格
+
+  - 集成知识蒸馏功能│
+
+  - Video-aware数据分割策略├─ docs/                              # ✅ 文档与图表
+
+  - 高级损失函数组合 (CE+Dice, Focal, Label Smoothing)│  └─ diagrams/                      # ✅ Mermaid流程图目录
+
+  - 自动早停和混合评估策略│
+
+  - 完整的参数验证系统├─ scripts/                           # ✅ 命令行脚本（可复现运行）
+
 │  ├─ seg8k_fetch.py                 # ✅ 数据集下载脚本（缓存管理，断点续传）
-│  ├─ demo_multiclass_color.py       # ✅ 多类分割可视化演示脚本（PALETTE验证）
-│  ├─ validate_watershed_mechanism.py # ✅ Watershed机制验证脚本（含真实模型预测，特征可视化）
-│  ├─ post_training_viz.py           # ✅ 训练后可视化脚本（预测结果生成和对比分析）
-│  ├─ train_monitor.py               # ✅ 训练监控模块（已移至src/common/）
+
+#### 在线学习模块 (`online/`)│  ├─ demo_multiclass_color.py       # ✅ 多类分割可视化演示脚本（PALETTE验证）
+
+- **online_universal.py**: 标准在线学习系统│  ├─ validate_watershed_mechanism.py # ✅ Watershed机制验证脚本（含真实模型预测，特征可视化）
+
+- **online_universal_v1.py**: V1版本在线学习│  ├─ post_training_viz.py           # ✅ 训练后可视化脚本（预测结果生成和对比分析）
+
+- **online_universal_lv.py**: 长视频处理版本│  ├─ train_monitor.py               # ✅ 训练监控模块（已移至src/common/）
+
 │  ├─ train_offline.sh               # 📋 离线训练入口
-│  ├─ distill.sh                     # 📋 重→轻蒸馏
-│  ├─ export_onnx.sh                 # 📋 导出ONNX模型（TRT加速）
-│  ├─ run_online.sh                  # 📋 在线推理入口
+
+#### 训练管理 (`resume_manager.py`)│  ├─ distill.sh                     # 📋 重→轻蒸馏
+
+- 训练状态恢复管理│  ├─ export_onnx.sh                 # 📋 导出ONNX模型（TRT加速）
+
+- 检查点完整性验证│  ├─ run_online.sh                  # 📋 在线推理入口
+
 │  ├─ ablation_suite.sh              # 📋 批量运行消融实验
-│  └─ eval_offline.sh                # 📋 离线模型验证
+
+### 2. 模型架构 (`src/models/`)│  └─ eval_offline.sh                # 📋 离线模型验证
+
 │
-├─ notebooks/                         # ✅ Jupyter实验笔记
-│  ├─ 01_data_checks.ipynb           # 📋 数据检查
-│  ├─ 02_entropy_threshold_sweep.ipynb # 📋 熵阈值调优
-│  └─ 03_runtime_budget.ipynb        # 📋 运行时资源评估
+
+#### 模型工厂 (`model_zoo.py`)├─ notebooks/                         # ✅ Jupyter实验笔记
+
+- 统一的模型构建接口│  ├─ 01_data_checks.ipynb           # 📋 数据检查
+
+- 支持架构：UNet、UNet++、Adaptive UNet│  ├─ 02_entropy_threshold_sweep.ipynb # 📋 熵阈值调优
+
+- 自动stage识别和配置│  └─ 03_runtime_budget.ipynb        # 📋 运行时资源评估
+
 │
-├─ docker/                            # ✅ Docker环境
-│  ├─ environment.yml                # ✅ Conda环境配置
-│  └─ Dockerfile                     # 📋 容器构建文件
-│
-├─ tests/                             # ✅ 核心功能单元测试目录
-│  ├─ test_entropy.py                # 📋 熵计算测试
-│  ├─ test_gating.py                 # 📋 门控逻辑测试
-│  ├─ test_hysteresis.py             # 📋 迟滞机制测试
-│  ├─ test_rollback.py               # 📋 回滚机制测试
-│  └─ test_pseudo_labels.py          # 📋 伪标签生成测试
-│
-├─ utils/                             # 🆕 实用工具模块
-│  ├─ ReadMe.md                      # ✅ 工具模块说明文档
-│  ├─ class_frame_extractor.py       # 🆕 视频帧提取工具（支持FFmpeg和OpenCV双模式）
+
+#### 分类模型定义├─ docker/                            # ✅ Docker环境
+
+- **baseline/**: 基线模型实现│  ├─ environment.yml                # ✅ Conda环境配置
+
+- **offline/**: 离线训练专用模型│  └─ Dockerfile                     # 📋 容器构建文件
+
+- **online/**: 在线学习专用模型│
+
+### 3. 数据处理 (`src/dataio/`)
+
+#### 数据集类 (`datasets/`)
+
+- **seg_dataset_min.py**: 核心分割数据集类
+
+  - 多种标注映射方案 (3class_org, binary等)│  └─ test_pseudo_labels.py          # 📋 伪标签生成测试
+
+  - FOV遮罩处理和黑边去除│
+
+  - 数据增强集成├─ utils/                             # 🆕 实用工具模块
+
+  - 分布分析和健康检查功能│  ├─ ReadMe.md                      # ✅ 工具模块说明文档
+
+  - Watershed区域重映射│  ├─ class_frame_extractor.py       # 🆕 视频帧提取工具（支持FFmpeg和OpenCV双模式）
+
 │  └─ class_distillation.py          # 🆕 知识蒸馏框架（损失函数+特征提取器）
-│  └─ class_frame_to_video.py        # 🆕 帧合并视频工具
-│
-├─ src/                               # ✅ 核心源代码
-   ├─ common/                        # ✅ 公共工具
-   │  ├─ constants.py                # ✅ 全局常量定义（CLASSES、PALETTE、IGNORE_INDEX，数据路径映射）
+
+### 4. 评估系统 (`src/eval/`)│  └─ class_frame_to_video.py        # 🆕 帧合并视频工具
+
+- **evaluator.py**: 模型评估器│
+
+  - 多指标计算 (IoU, Dice, Accuracy, Precision, Recall)├─ src/                               # ✅ 核心源代码
+
+  - 分类和分割任务支持   ├─ common/                        # ✅ 公共工具
+
+  - 混合评估策略   │  ├─ constants.py                # ✅ 全局常量定义（CLASSES、PALETTE、IGNORE_INDEX，数据路径映射）
+
    │  ├─ output_manager.py           # ✅ 输出目录管理和结果保存（检查点、可视化、日志统一管理）
-   │  ├─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条、ETA预估）
-   │  ├─ ema_safety.py               # ✅ EMA权重安全更新（防止过拟合，自适应衰减率）
-   │  └─ pseudo_label_generator.py   # ✅ 伪标签生成器（在线自适应学习的核心组件）
-   ├─ dataio/                        # ✅ 数据加载与预处理
+
+### 5. 可视化工具 (`src/viz/`)   │  ├─ train_monitor.py            # ✅ 训练监控模块（单行刷新、GPU监控、进度条、ETA预估）
+
+- **visualizer.py**: 训练过程可视化   │  ├─ ema_safety.py               # ✅ EMA权重安全更新（防止过拟合，自适应衰减率）
+
+- **distillation_visualizer.py**: 知识蒸馏专用可视化   │  └─ pseudo_label_generator.py   # ✅ 伪标签生成器（在线自适应学习的核心组件）
+
+- **colorize.py**: 分割结果着色工具   ├─ dataio/                        # ✅ 数据加载与预处理
+
    │  └─ datasets/                   # ✅ 数据集类
-   │     └─ seg_dataset_min.py       # ✅ 最小数据集类（images/、masks/，支持二分类/多分类切换，FOV遮罩功能）
-   ├─ eval/                          # ✅ 评估模块
-   │  └─ evaluator.py                # ✅ 分割指标评估器（IoU、Dice、Accuracy等，支持二分类/多分类）
-   ├─ models/                        # ✅ 模型结构
-   │  ├─ model_zoo.py                # ✅ 模型动物园（统一模型构建和管理，支持教师/学生模型实例化）
-   │  ├─ baseline/                   # ✅ 基线模型
+
+### 6. 通用组件 (`src/common/`)   │     └─ seg_dataset_min.py       # ✅ 最小数据集类（images/、masks/，支持二分类/多分类切换，FOV遮罩功能）
+
+- **constants.py**: 项目常量和映射定义   ├─ eval/                          # ✅ 评估模块
+
+- **output_manager.py**: 输出文件管理和结构化存储   │  └─ evaluator.py                # ✅ 分割指标评估器（IoU、Dice、Accuracy等，支持二分类/多分类）
+
+- **train_monitor.py**: 训练监控系统 (GPU, Loss跟踪)   ├─ models/                        # ✅ 模型结构
+
+- **pseudo_label_quality.py**: 伪标签质量评估   │  ├─ model_zoo.py                # ✅ 模型动物园（统一模型构建和管理，支持教师/学生模型实例化）
+
+- **ema_safety.py**: EMA安全管理器   │  ├─ baseline/                   # ✅ 基线模型
+
    │  │  └─ unet_min.py              # ✅ 最小 U-Net（基础分割架构）
-   │  ├─ offline/                    # ✅ 离线重模型目录（预留扩展）
+
+### 7. 配置系统 (`configs/`)   │  ├─ offline/                    # ✅ 离线重模型目录（预留扩展）
+
    │  └─ online/                     # ✅ 在线/轻量模型
-   │     ├─ mobile_unet.py           # ✅ MobileNet风格的轻量U-Net（深度可分离卷积）
-   │     └─ adaptive_unet.py         # ✅ 自适应U-Net（带适配器层，支持在线学习）
-   ├─ training/                      # ✅ 训练流程
-   │  ├─ offline/                    # ✅ 离线训练模块
+
+#### 实验配置 (`experiments/`)   │     ├─ mobile_unet.py           # ✅ MobileNet风格的轻量U-Net（深度可分离卷积）
+
+- **new - kd_student_config.yaml**: KD学生模型配置 (30 epochs, video-aware)   │     └─ adaptive_unet.py         # ✅ 自适应U-Net（带适配器层，支持在线学习）
+
+- **new - s_equal_config.yaml**: 等预算基线配置 (30 epochs, 无KD)   ├─ training/                      # ✅ 训练流程
+
+- **new - s_long_config.yaml**: 长训练基线配置 (90 epochs, 3x预算)   │  ├─ offline/                    # ✅ 离线训练模块
+
    │  │  ├─ train_offline_min.py     # ✅ 最小离线训练（1个epoch测试）+ 🔄 可集成监控
-   │  │  └─ train_offline_universal.py # ✅ 通用离线训练模板（集成监控、可视化、评估，支持二分类/多分类）
-   │  └─ online/                     # ✅ 在线训练模块
-   │     └─ adaptive_unet_main.py    # ✅ 在线自适应学习主程序（帧选择、经验回放、在线训练）
-   ├─ metrics/                       # 📋 评估模块（已移至src/eval/）
+
+#### 训练配置   │  │  └─ train_offline_universal.py # ✅ 通用离线训练模板（集成监控、可视化、评估，支持二分类/多分类）
+
+- **teacher_training_improved_config.yaml**: 教师模型训练配置   │  └─ online/                     # ✅ 在线训练模块
+
+- **baseline_training_improved_config.yaml**: 基线训练配置   │     └─ adaptive_unet_main.py    # ✅ 在线自适应学习主程序（帧选择、经验回放、在线训练）
+
+- **universal_template_config.yaml**: 通用模板配置   ├─ metrics/                       # 📋 评估模块（已移至src/eval/）
+
    │  └─ evaluator.py                # 📋 分割指标评估器（已移至src/eval/evaluator.py）
-   ├─ online/                        # 📋 在线推理与安全机制（规划中）
+
+### 8. 工具脚本 (`scripts/`)   ├─ online/                        # 📋 在线推理与安全机制（规划中）
+
    │  ├─ safety_controller.py        # 📋 完整安全控制器（多信号门控+三重缓冲）
-   │  ├─ gating_system.py           # 📋 多信号门控系统（熵/空间/时间/代理一致性）
-   │  ├─ buffer_mechanisms.py       # 📋 三重缓冲机制（滞回记忆+智能回滚+自适应冷却）
-   │  └─ conservative_updater.py    # 📋 保守更新模式（BN-only/Decoder-Lite/Adapter-only）
-   └─ viz/                          # ✅ 可视化工具
-      ├─ colorize.py                 # ✅ 颜色映射和可视化函数（id_to_color、make_triplet、overlay）
-      ├─ visualizer.py               # ✅ 可视化器（预测结果、叠加图像，支持任务自动检测）
+
+#### 数据验证工具   │  ├─ gating_system.py           # 📋 多信号门控系统（熵/空间/时间/代理一致性）
+
+- **scan_ws_values.py**: WS值全数据集扫描器   │  ├─ buffer_mechanisms.py       # 📋 三重缓冲机制（滞回记忆+智能回滚+自适应冷却）
+
+- **scan_color_palette.py**: 颜色调色板一致性检查   │  └─ conservative_updater.py    # 📋 保守更新模式（BN-only/Decoder-Lite/Adapter-only）
+
+- **check_single_frame_mapping.py**: 单帧映射验证和可视化   └─ viz/                          # ✅ 可视化工具
+
+- **validate_watershed_mechanism.py**: Watershed学习机制验证      ├─ colorize.py                 # ✅ 颜色映射和可视化函数（id_to_color、make_triplet、overlay）
+
+- **check_mapping_once.py**: 映射链完整性检查      ├─ visualizer.py               # ✅ 可视化器（预测结果、叠加图像，支持任务自动检测）
+
       └─ distillation_visualizer.py  # 🆕 知识蒸馏可视化工具（特征图对比、损失分析）
-```
 
-## 🔒 在线学习安全机制详解
+#### 实验工具```
 
-### 🎯 安全机制设计原理
+- **run_kd_evidence_experiments.py**: KD证据实验自动运行器
 
-我们的在线学习系统采用**多层次防护架构**，确保模型在实时更新过程中不会发生灾难性遗忘或性能退化：
+- **visualize_metrics.py**: 独立指标可视化工具## 🔒 在线学习安全机制详解
 
-### 🔒 多信号门控系统 (Multi-Signal Gating)
+- **post_training_viz.py**: 训练后结果可视化
 
-#### 1. 熵阈值门控 (Entropy-Based Gating)
-- **原理**: 利用预测熵衡量模型对像素分类的确信度
-- **实现**: 
-  - 计算像素级预测熵: `H = -Σ p_i * log(p_i)`
-  - 设置双阈值过滤: 固定阈值 + 自适应百分位阈值
+- **export_teacher_split.py**: 教师模型数据分割导出### 🎯 安全机制设计原理
+
+
+
+#### 分析工具我们的在线学习系统采用**多层次防护架构**，确保模型在实时更新过程中不会发生灾难性遗忘或性能退化：
+
+- **count_params.py**: 模型参数统计
+
+- **demo_multiclass_color.py**: 多分类结果着色演示### 🔒 多信号门控系统 (Multi-Signal Gating)
+
+
+
+### 9. 工具模块 (`utils/`)#### 1. 熵阈值门控 (Entropy-Based Gating)
+
+- **class_distillation.py**: 知识蒸馏核心实现- **原理**: 利用预测熵衡量模型对像素分类的确信度
+
+- **composite_losses.py**: 复合损失函数库- **实现**: 
+
+- **class_frame_extractor.py**: 视频帧提取工具  - 计算像素级预测熵: `H = -Σ p_i * log(p_i)`
+
+- **class_frame_to_video.py**: 帧序列转视频工具  - 设置双阈值过滤: 固定阈值 + 自适应百分位阈值
+
   - 仅更新低熵（高置信度）区域的参数
-- **防护效果**: 避免在模糊区域进行误导性更新
 
-#### 2. 空间一致性检查 (Spatial Consistency Verification)
-- **原理**: 检查预测结果的空间连通性和形态学合理性
-- **实现**:
-  - 连通组件分析: 过滤小于阈值的碎片区域
+### 10. 数据和输出- **防护效果**: 避免在模糊区域进行误导性更新
+
+
+
+#### 数据目录 (`data/`)#### 2. 空间一致性检查 (Spatial Consistency Verification)
+
+- **seg8k/**: Seg8K数据集存储- **原理**: 检查预测结果的空间连通性和形态学合理性
+
+- **cholec80/**: CholecT80数据集存储- **实现**:
+
+- **seg8k_cache_path.json**: 数据路径缓存文件  - 连通组件分析: 过滤小于阈值的碎片区域
+
   - 形态学过滤: 开运算去噪 + 闭运算填洞
-  - 区域大小验证: 确保预测区域符合医学常识
-- **防护效果**: 防止空间不连续的错误预测干扰训练
+
+#### 输出目录 (`outputs/`)  - 区域大小验证: 确保预测区域符合医学常识
+
+- 按时间戳和实验名组织的训练输出- **防护效果**: 防止空间不连续的错误预测干扰训练
+
+- 包含检查点、日志、可视化结果、配置快照
 
 #### 3. 时间一致性门控 (Temporal Consistency Gating)
+
 - **原理**: 跨帧对齐检测，确保预测时间连贯性
+
 - **实现**:
+
   - 帧间IoU计算: 与历史N帧预测的平均对齐度
-  - 时间平滑: 加权平均历史预测，抑制突变
-  - 一致性阈值: 低于阈值时拒绝更新
+
+#### 分割文件 (`splits/`)  - 时间平滑: 加权平均历史预测，抑制突变
+
+- Video-aware数据分割结果存储  - 一致性阈值: 低于阈值时拒绝更新
+
 - **防护效果**: 避免因单帧异常导致的模型震荡
 
 #### 4. 代理指标门控 (Proxy Metrics Gating)
+
 - **原理**: 使用快速计算的代理指标评估预测质量
+
 - **实现**:
+
   - 灰度变化监控: 检测输入图像的复杂度变化
+
   - 预测稳定性: IoU/Dice分数的变化幅度
-  - 置信度分布: 预测概率的分布特征分析
-- **防护效果**: 提供多维度的质量评估，增强门控的鲁棒性
+
+### 11. 测试功能
+
+- **test_fov_integration.py**: FOV集成测试（根目录）
+
+- **test_resume_logic.py**: 训练恢复逻辑测试（根目录）
+
+> 注意：独立测试文件位于根目录，无单独tests/目录
 
 ### 🌀 三重缓冲保护机制 (Triple-Buffer Protection)
 
+### 12. 其他根目录文件
+
+- **monitor_kd_losses.py**: KD损失监控脚本
+
+- **offline_dataset_health_checks_summary.md**: 数据集健康检查总结
+
+- **palette_anomalies.csv**: 调色板异常报告
+
 #### 1. 滞回记忆系统 (Hysteresis Memory System)
-- **设计原理**: 类似电子电路中的施密特触发器，避免临界状态震荡
-- **实现机制**:
+
+- **offline_dataset_health_checks_summary.md**: 数据集健康检查总结- **设计原理**: 类似电子电路中的施密特触发器，避免临界状态震荡
+
+- **palette_anomalies.csv**: 调色板异常报告- **实现机制**:
+
   - **Enter阈值**: 置信度需超过高阈值(0.8)才进入更新状态
-  - **Stay阈值**: 进入后只需保持中阈值(0.6)即可继续更新
+
+## 项目特色功能  - **Stay阈值**: 进入后只需保持中阈值(0.6)即可继续更新
+
   - **记忆窗口**: 维护最近N帧的置信度历史，平滑决策
-- **防护效果**: 防止在临界置信度附近的频繁切换
 
-#### 2. 智能回滚机制 (Intelligent Rollback System)
-- **设计原理**: 周期性保存模型快照，性能下降时自动回滚
-- **实现机制**:
+### 1. 知识蒸馏系统- **防护效果**: 防止在临界置信度附近的频繁切换
+
+- 完整的Teacher-Student框架
+
+- 特征级和输出级蒸馏#### 2. 智能回滚机制 (Intelligent Rollback System)
+
+- 温度调节和权重平衡- **设计原理**: 周期性保存模型快照，性能下降时自动回滚
+
+- 证据包生成和可视化系统- **实现机制**:
+
   - **快照策略**: 每N帧保存一次模型状态和性能指标
-  - **性能监控**: 实时跟踪IoU/Dice等指标的变化趋势
-  - **回滚触发**: 性能下降超过阈值(15%)时自动回滚到最佳快照
-  - **快照选择**: 选择历史性能最优的快照进行恢复
-- **防护效果**: 提供"时光机"般的恢复能力，确保模型性能不会持续退化
 
-#### 3. 自适应冷却期 (Adaptive Cooldown Period)
-- **设计原理**: 在检测到问题后强制进入"冷静期"，避免连续错误
-- **实现机制**:
-  - **触发条件**: 回滚执行、连续更新失败、异常检测
-  - **冷却时长**: 基础时长 × (严重性系数 + 历史回滚次数 × 0.5)
+### 2. Video-aware数据分割  - **性能监控**: 实时跟踪IoU/Dice等指标的变化趋势
+
+- 避免视频级数据泄漏  - **回滚触发**: 性能下降超过阈值(15%)时自动回滚到最佳快照
+
+- 智能视频分组和帧分配  - **快照选择**: 选择历史性能最优的快照进行恢复
+
+- 支持多种分割策略- **防护效果**: 提供"时光机"般的恢复能力，确保模型性能不会持续退化
+
+
+
+### 3. 高级损失函数#### 3. 自适应冷却期 (Adaptive Cooldown Period)
+
+- CE+Dice组合损失- **设计原理**: 在检测到问题后强制进入"冷静期"，避免连续错误
+
+- Focal Loss集成- **实现机制**:
+
+- 标签平滑技术  - **触发条件**: 回滚执行、连续更新失败、异常检测
+
+- 自动类别权重计算  - **冷却时长**: 基础时长 × (严重性系数 + 历史回滚次数 × 0.5)
+
   - **渐进恢复**: 冷却期内禁止所有更新，期满后逐步恢复
-- **防护效果**: 给模型"冷静时间"，防止错误的连锁反应
 
-### ⚖️ 保守更新模式 (Conservative Update Modes)
+### 4. 混合评估策略- **防护效果**: 给模型"冷静时间"，防止错误的连锁反应
+
+- Loss和mIoU双重判定
+
+- 早停阈值控制### ⚖️ 保守更新模式 (Conservative Update Modes)
+
+- 训练稳定性保障
 
 #### 1. BN-only更新模式
-- **适用场景**: 中等置信度(0.7-0.9)，需要轻微适应
-- **更新策略**: 仅更新BatchNorm层的运行统计量
-- **技术细节**: 冻结所有权重参数，仅前向传播更新BN统计
-- **安全性**: 最保守的更新方式，几乎不改变模型行为
+
+### 5. 数据健康检查体系- **适用场景**: 中等置信度(0.7-0.9)，需要轻微适应
+
+- 标签分布全面验证- **更新策略**: 仅更新BatchNorm层的运行统计量
+
+- 映射链完整性检查- **技术细节**: 冻结所有权重参数，仅前向传播更新BN统计
+
+- 调色板一致性验证- **安全性**: 最保守的更新方式，几乎不改变模型行为
+
+- 单帧映射可视化检查
 
 #### 2. Decoder-Lite更新模式  
-- **适用场景**: 高置信度(0.9+)，需要局部微调
-- **更新策略**: 仅更新解码器部分，编码器保持冻结
-- **技术细节**: 小学习率(0.1x) + 梯度裁剪 + 少步更新(3-5步)
-- **安全性**: 保持特征提取能力，仅调整决策边界
+
+### 6. 完整的可视化系统- **适用场景**: 高置信度(0.9+)，需要局部微调
+
+- 训练过程实时监控- **更新策略**: 仅更新解码器部分，编码器保持冻结
+
+- 知识蒸馏专用可视化- **技术细节**: 小学习率(0.1x) + 梯度裁剪 + 少步更新(3-5步)
+
+- 独立指标分析工具- **安全性**: 保持特征提取能力，仅调整决策边界
+
+- 证据包生成系统
 
 #### 3. Adapter-only更新模式
-- **适用场景**: 需要快速适应新的数据分布
-- **更新策略**: 仅更新专门的适配器层参数
-- **技术细节**: 轻量级适配器插入到主干网络中
-- **安全性**: 保持主体网络稳定，适配器提供灵活性
 
-#### 4. 安全子集更新模式
+## 使用流程- **适用场景**: 需要快速适应新的数据分布
+
+- **更新策略**: 仅更新专门的适配器层参数
+
+### 离线训练- **技术细节**: 轻量级适配器插入到主干网络中
+
+```bash- **安全性**: 保持主体网络稳定，适配器提供灵活性
+
+python src/training/offline/train_offline_universal.py --config configs/experiments/new_kd_student_config.yaml
+
+```#### 4. 安全子集更新模式
+
 - **适用场景**: 极高置信度区域的精细调优
-- **更新策略**: 仅对高置信度像素计算梯度和更新
-- **技术细节**: 基于置信度mask的选择性反向传播
-- **安全性**: 确保只有最可信的信号参与模型更新
+
+### 在线学习- **更新策略**: 仅对高置信度像素计算梯度和更新
+
+```bash- **技术细节**: 基于置信度mask的选择性反向传播
+
+python src/training/online/online_universal.py --config configs/online/online_config.yaml- **安全性**: 确保只有最可信的信号参与模型更新
+
+```
 
 ### 🎛️ 安全机制协调工作流程
 
+### 数据验证
 
-### 📊 安全机制配置文件结构
+```bash
+
+python scripts/check_single_frame_mapping.py --image path/to/image --ws path/to/mask --mapping path/to/mapping.yaml### 📊 安全机制配置文件结构
+
+```
 
 我们将在 `configs/online/safety_mechanisms.yaml` 中提供可调参数
 
+### 指标可视化
 
-### 🆕 通用训练模板 (`src/training/offline/train_offline_universal.py`)
-- **功能**: 集成监控、可视化、评估的通用训练框架
+```bash
+
+python scripts/visualize_metrics.py --run_dir outputs/experiment_name### 🆕 通用训练模板 (`src/training/offline/train_offline_universal.py`)
+
+```- **功能**: 集成监控、可视化、评估的通用训练框架
+
 - **特点**: 
-  - 实时进度监控（单行刷新）
-  - GPU使用率和内存监控
-  - 自动模型保存和指标记录
-  - 可视化结果自动生成
+
+### KD实验运行  - 实时进度监控（单行刷新）
+
+```bash  - GPU使用率和内存监控
+
+python scripts/run_kd_evidence_experiments.py  - 自动模型保存和指标记录
+
+```  - 可视化结果自动生成
   - 易于适配不同模型架构
   - **🔥 支持二分类和多分类分割任务无缝切换**
   - 模型插拔机制（通过model_zoo统一管理）

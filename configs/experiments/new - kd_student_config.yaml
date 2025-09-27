@@ -4,8 +4,8 @@
 
 # --- 基础 ---
 experiment_regime: "KD-Student-VideoAware"
-experiment_notes: "Video-aware split; T=5.0, alpha=0.55; KD training"
-epochs: 20
+experiment_notes: "Video-aware split; T=5.0, alpha=0.5; KD training, 30 epochs"
+epochs: 30
 batch_size: 6
 img_size: 384
 num_classes: 3
@@ -16,7 +16,7 @@ classification_scheme: "3class_org"
 
 # --- 优化与调度 ---
 optimizer: "adamw"
-lr: 0.0003
+lr: 0.0005
 weight_decay: 0.001
 scheduler: "cosine"
 
@@ -25,7 +25,7 @@ split_strategy: "video_aware"          # ✅ 支持
 val_ratio: 0.2                         # video_aware需要
 
 # --- FOV/预处理 ---
-apply_fov_mask: false
+apply_fov_mask: true
 
 # --- 增强 ---
 augment: true
@@ -40,8 +40,8 @@ student_model: "adaptive_unet"
 
 # 蒸馏参数（使用系统支持的格式）
 distill_temperature: 5.0              # temperature
-distill_alpha: 0.55                   # KD权重
-distill_beta: 0.45                    # Task权重  
+distill_alpha: 0.5                    # KD权重 (降低以防压过CE+Dice)
+distill_beta: 0.5                     # Task权重  
 distill_feature_weight: 0.1           # 特征蒸馏权重
 
 # --- 监控/保存/早停 ---
@@ -49,7 +49,7 @@ save_best_only: true
 val_interval: 1
 save_interval: 5
 early_stopping: true
-patience: 8
+patience: 10
 loss_threshold: 0.015                  # Loss改善阈值（hybrid evaluation）
 loss_degradation_threshold: 0.05       # Loss恶化阈值
 

@@ -263,3 +263,5 @@ test_resume_logic.py
 docs/Video_Aware_Data_Splitting_Summary.md
 configs/experiments/test_split_strategies.yaml
 offline_dataset_health_checks_summary.md
+project_structure_final_update_report.md
+PROJECT_STRUCTURE copy.md
