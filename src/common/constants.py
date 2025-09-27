@@ -55,6 +55,41 @@ GT_PALETTE = {
     17: (100, 255, 255), # 区域17：亮浅青
 }
 
+# === New: palette selector per scheme ===
+def get_palette_for_scheme(scheme: str):
+    """
+    Return a palette dict {train_class_id: (R,G,B)} that matches the
+    class index order of the chosen scheme.
+    """
+    scheme = (scheme or "").lower()
+
+    if scheme == "3class_org":
+        # [background(0), instrument(1), target_organ(2)]
+        return {
+            0: (50, 50, 50),     # background (dark gray)
+            1: (50, 255, 255),   # instrument (CYAN) -> 与可视化一致
+            2: (255, 50, 255),   # target organ (MAGENTA)
+        }
+
+    if scheme == "6class":
+        # [background(0), liver(1), fat(2), gi_tract(3), instrument(4), gallbladder(5)]
+        return {
+            0: (50, 50, 50),     # background
+            1: (50, 255, 50),    # liver (GREEN)
+            2: (255, 50, 255),   # fat (MAGENTA)
+            3: (255, 255, 50),   # GI tract (YELLOW)
+            4: (50, 255, 255),   # instrument (CYAN)  <- 关键：器械用青色
+            5: (255, 50, 50),    # gallbladder (RED)
+        }
+
+    if scheme == "detailed":
+        # 13 类直接复用 GT_PALETTE 的编号
+        return GT_PALETTE
+
+    # fallback
+    return GT_PALETTE
+
+
 # 专用于区域分离的超高对比度颜色
 REGION_SEPARATION_COLORS = {
     0: (0, 0, 0),           # 背景：纯黑

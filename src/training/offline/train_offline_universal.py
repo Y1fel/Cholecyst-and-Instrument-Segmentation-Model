@@ -840,6 +840,8 @@ def create_optimizer(model, args):
 
 # build scheduler
 def create_scheduler(optimizer, args):
+    from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
     if args.scheduler == "none":
         return None
     elif args.scheduler == "step":
@@ -848,6 +850,11 @@ def create_scheduler(optimizer, args):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     elif args.scheduler == "plateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    elif args.scheduler == "cosine_warmup":
+        warmup = max(2, int(0.1 * args.epochs))  # 前 10% epoch 线性升温
+        sched1 = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup)
+        sched2 = CosineAnnealingLR(optimizer, T_max=args.epochs - warmup)
+        return SequentialLR(optimizer, schedulers=[sched1, sched2], milestones=[warmup])
     else:
         raise ValueError(f"Unknown scheduler: {args.scheduler}")
     
@@ -996,8 +1003,8 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
     
     # Initialize components
     evaluator = Evaluator(device=device)
-    distill_visualizer = DistillationVisualizer(output_mgr.get_vis_dir(), device)
-    visualizer = Visualizer()
+    distill_visualizer = DistillationVisualizer(output_mgr.get_vis_dir(), device, classification_scheme=args.classification_scheme)
+    visualizer = Visualizer(classification_scheme=args.classification_scheme)
     
     print(f"📊 Experiment: {experiment_name}")
     print(f"📁 Output Directory: {output_mgr.get_run_dir()}")
@@ -1808,7 +1815,7 @@ def main():
             print("WARNING: Best model not found, using current model for visualization")
         
         print("-- Saving Visualizations --")
-        visualizer = Visualizer()
+        visualizer = Visualizer(classification_scheme=args.classification_scheme)
         viz_dir = output_mgr.get_vis_dir() # Get visualization directory
 
         # Save visualization results
@@ -1822,7 +1829,7 @@ def main():
         # 蒸馏模式特有的可视化
         if args.enable_distillation and DISTILLATION_AVAILABLE:
             print("-- Generating Distillation Analysis --")
-            distill_visualizer = DistillationVisualizer(viz_dir, device)
+            distill_visualizer = DistillationVisualizer(viz_dir, device, classification_scheme=args.classification_scheme)
             
             # Teacher-Student预测对比
             distill_visualizer.visualize_prediction_comparison(
@@ -1892,7 +1899,7 @@ def main():
     
     # 保存指标曲线图
     if 'monitor' in locals():
-        viz_visualizer = Visualizer()
+        viz_visualizer = Visualizer(classification_scheme=args.classification_scheme)
         metrics_history = monitor.get_metrics_history()
         if metrics_history:
             curves_path = output_mgr.get_viz_path("training_curves.png")

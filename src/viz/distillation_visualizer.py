@@ -11,9 +11,10 @@ from torch.utils.data import DataLoader
 class DistillationVisualizer:
     """知识蒸馏专用可视化器"""
     
-    def __init__(self, save_dir: str, device: str = "cuda"):
+    def __init__(self, save_dir: str, device: str = "cuda", classification_scheme: Optional[str] = None):
         self.save_dir = save_dir
         self.device = device
+        self.classification_scheme = classification_scheme
         os.makedirs(save_dir, exist_ok=True)
         
         # 创建子目录
@@ -457,7 +458,7 @@ Final mIoU: {metrics_history.get('miou', [0])[-1]:.4f}
         
         # 1. 生成标准证据包（与标准可视化器格式一致）
         from src.viz.visualizer import Visualizer
-        standard_viz = Visualizer()
+        standard_viz = Visualizer(classification_scheme=self.classification_scheme)
         
         # 重用标准可视化器的证据包生成逻辑
         evidence_package = standard_viz.generate_kd_evidence_package(

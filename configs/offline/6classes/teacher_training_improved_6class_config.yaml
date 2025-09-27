@@ -1,0 +1,75 @@
+# Teacher训练改进配置文件
+# 针对过度预测问题的优化版本
+
+# === 基础训练配置 ===
+epochs: 3
+batch_size: 6           
+lr: 0.0005              # 适中学习率
+img_size: 384           # 提高分辨率以获得更精细的分割
+num_workers: 0          
+num_classes: 6    
+
+# === 数据配置 ===
+split: "train"
+binary: false           
+val_ratio: 0.25         # 增加验证集比例
+monitor_interval: 5     
+
+# === 关键：使用相同的分类方案 ===
+classification_scheme: "6class"    
+
+# === 标准训练模式（非蒸馏） ===
+enable_distillation: false
+model: "unet_plus_plus"
+
+# === 训练策略 ===
+stage: "offline"
+
+# === 优化器配置 ===
+optimizer: "adamw"
+sgd_momentum: 0.9       # SGD优化器动量（当使用SGD时）
+weight_decay: 0.001     # 增加正则化
+scheduler: "cosine"
+
+# === 数据增强（增强版） ===
+augment: true
+flip_prob: 0.6
+rotation_degree: 25
+
+# === FOV处理 ===
+apply_fov_mask: true  # 是否应用视野遮罩去除黑边
+
+# === 监控和可视化 ===
+enable_gpu_monitor: true
+save_viz: true
+viz_samples: 12         # 增加可视化样本
+
+# === 保存策略 ===
+save_interval: 2        # 更频繁保存
+val_interval: 1
+save_best_only: true
+
+# === 调试配置 ===
+debug: false
+early_stopping: true
+patience: 20
+
+# === 高级损失配置 (为兼容性添加，使用默认值保持一致性) ===
+# 注意：这些参数使用默认值，确保与原有训练行为完全一致
+# focal_gamma: 2.0          # Focal Loss gamma参数（不启用时无影响）
+dice_weight: 0.3          # Dice Loss权重（0.0 = 只使用CE Loss，保持原有行为）
+ce_weight: 1.0            # CrossEntropy Loss权重
+loss_reduction: "mean"    # 损失缩减方式
+auto_class_weights: true  # 不使用自动类别权重，保持原有行为
+class_weights: []  # 手动类别权重（均等权重）
+ignore_index: 255        # 忽略的索引值
+early_stopping_metric: "miou"  # 早停监控指标
+
+# === 数据分割策略 (为兼容性添加) ===
+split_strategy: "video_aware"  # 使用video-aware分割策略，与baseline保持一致
+
+# === 实验标识 ===
+experiment_regime: "Teacher-UNet++-6class"
+experiment_notes: "6-class teacher for KD; CE+Dice; video-aware split"
+
+
