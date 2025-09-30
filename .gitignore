@@ -226,6 +226,7 @@ splits/*
 *.npz
 *.npy
 
+tmp/
 # 编辑器/系统
 .vscode/
 .idea/

@@ -102,7 +102,13 @@ def main():
             masks = masks.to(device, non_blocking=True)
 
             outputs = model(images)
-            loss = criterion(outputs, masks)
+            if args.num_classes == 2:
+                target = masks.float()
+                if target.dim() == 3:
+                    target = target.unsqueeze(1)
+                loss = criterion(outputs, target)
+            else:
+                loss = criterion(outputs, masks.long())
 
             optimizer.zero_grad(set_to_none = True)
             loss.backward()

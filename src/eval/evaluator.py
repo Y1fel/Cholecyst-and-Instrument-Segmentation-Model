@@ -4,7 +4,7 @@
 """
 import torch, cv2
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Iterable
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -31,10 +31,16 @@ class Evaluator:
 
                 # forward
                 logits = model(images)
-                loss   = criterion(logits, masks)
+
+                target_for_loss = masks
+                if logits.dim() == 4 and logits.shape[1] == 1:
+                    target_for_loss = masks.float()
+                    if target_for_loss.dim() == 3:
+                        target_for_loss = target_for_loss.unsqueeze(1)
+
+                loss = criterion(logits, target_for_loss)
                 val_loss += loss.item()
 
-                # gain predicted results (binary segmentation)
                 probs = torch.sigmoid(logits)
                 pred  = (probs > self.threshold).int()
 
@@ -81,61 +87,74 @@ class Evaluator:
             return torch.argmax(logits, dim=1)
 
     @torch.inference_mode()
-    def evaluate_multiclass(self, model, val_loader, criterion, num_classes: int, ignore_index: int) -> Dict:
-        """多类评估接口"""
+    def evaluate_multiclass(self, model, val_loader, criterion, num_classes: int, ignore_index: int,
+                             exclude_metric_classes: Optional[Iterable[int]] = None) -> Dict:
+        """Multi-class evaluation helper"""
         model.eval()
-        total_loss  = 0.0
+        total_loss = 0.0
         total_count = 0
 
-        # accmulate confusion matrix
         confusion_matrix = torch.zeros((num_classes, num_classes), dtype=torch.long, device=self.device)
 
         for images, targets in val_loader:
-            images  = images.to(self.device, non_blocking=True)
+            images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True).long()
-            logits  = model(images)
-            loss    = criterion(logits, targets)
-            total_loss  += float(loss.item()) * images.size(0)
+            logits = model(images)
+            loss = criterion(logits, targets)
+            total_loss += float(loss.item()) * images.size(0)
             total_count += images.size(0)
 
-            # predict
             preds = logits.argmax(dim=1)
 
-            # ignore index
             valid = (targets != ignore_index)
             if valid.sum() == 0:
                 continue
 
-            preds_v   = preds[valid].view(-1)
+            preds_v = preds[valid].view(-1)
             targets_v = targets[valid].view(-1)
-
-            # calculate
-            idx               = targets_v * num_classes + preds_v
-            bincount          = torch.bincount(idx, minlength=num_classes * num_classes)
+            idx = targets_v * num_classes + preds_v
+            bincount = torch.bincount(idx, minlength=num_classes * num_classes)
             confusion_matrix += bincount.view(num_classes, num_classes)
 
-        # from confusion matrix calculate
         tp = confusion_matrix.diag().float()
         fp = confusion_matrix.sum(dim=0).float() - tp
         fn = confusion_matrix.sum(dim=1).float() - tp
-        denom_iou  = tp + fp + fn
+        denom_iou = tp + fp + fn
         denom_dice = (2 * tp + fp + fn)
 
-        iou_per_class   = torch.where(denom_iou > 0, tp / denom_iou, torch.zeros_like(tp))
-        dice_per_class  = torch.where(denom_dice > 0, 2 * tp / denom_dice, torch.zeros_like(tp))
-        acc_per_class   = torch.where((tp + fn) > 0, tp / (tp + fn), torch.zeros_like(tp))
+        iou_per_class = torch.where(denom_iou > 0, tp / denom_iou, torch.zeros_like(tp))
+        dice_per_class = torch.where(denom_dice > 0, 2 * tp / denom_dice, torch.zeros_like(tp))
+        acc_per_class = torch.where((tp + fn) > 0, tp / (tp + fn), torch.zeros_like(tp))
+
+        mask = torch.ones_like(iou_per_class, dtype=torch.bool)
+        excluded = []
+        if exclude_metric_classes:
+            for cls in exclude_metric_classes:
+                try:
+                    cls_idx = int(cls)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= cls_idx < num_classes:
+                    mask[cls_idx] = False
+                    excluded.append(cls_idx)
+
+        valid_iou = iou_per_class[mask]
+        valid_dice = dice_per_class[mask]
+        valid_acc = acc_per_class[mask]
 
         metrics = {
-            "val_loss":       total_loss / total_count,
-            "miou":           iou_per_class.mean().item(),
-            "mdice":          dice_per_class.mean().item(),
-            "macc":           acc_per_class.mean().item(),
-            "iou_per_class":  iou_per_class.tolist(),
+            "val_loss": total_loss / max(1, total_count),
+            "miou": valid_iou.mean().item() if valid_iou.numel() > 0 else 0.0,
+            "mdice": valid_dice.mean().item() if valid_dice.numel() > 0 else 0.0,
+            "macc": valid_acc.mean().item() if valid_acc.numel() > 0 else 0.0,
+            "iou_per_class": iou_per_class.tolist(),
             "dice_per_class": dice_per_class.tolist(),
-            "acc_per_class":  acc_per_class.tolist()
+            "acc_per_class": acc_per_class.tolist(),
+            "excluded_metric_classes": sorted(set(excluded))
         }
 
         return metrics
+
 
     def compute_boundary_f1(self, predictions, targets, tolerance=2):
         if isinstance(predictions, torch.Tensor):
@@ -321,36 +340,30 @@ class Evaluator:
             'ece': ece
         }
     
-    def evaluate_with_full_metrics(self, model, val_loader, criterion, num_classes=None, 
-                                  ignore_index=255, task_type="auto", save_reliability_path=None):
-        """
-        完整指标评估 - 包含所有新指标
-        Args:
-            model: 待评估模型
-            val_loader: 验证数据加载器
-            criterion: 损失函数
-            num_classes: 类别数（多分类时需要）
-            ignore_index: 忽略的标签值
-            task_type: "binary", "multiclass", "auto"
-            save_reliability_path: 可靠性图保存路径
-        Returns:
-            dict: 包含所有指标的字典
-        """
+    def evaluate_with_full_metrics(self, model, val_loader, criterion, num_classes=None,
+                                   ignore_index=255, task_type="auto", save_reliability_path=None,
+                                   exclude_metric_classes=None, binary_mode=None, max_samples=None):
+        """Compute aggregate validation metrics including optional extras."""
         model.eval()
-        
-        # 收集所有logits和targets用于校准指标计算
+        task_type = (task_type or "auto").lower()
+        if binary_mode is not None:
+            task_type = "binary" if binary_mode else "multiclass"
+
         all_logits = []
         all_targets = []
         all_predictions = []
-        
+
+        max_samples = max_samples if isinstance(max_samples, int) and max_samples > 0 else None
+        collected = 0
+
         with torch.no_grad():
-            # 首先检测任务类型
+            sample_batch = None
+            sample_logits = None
             if task_type == "auto":
                 sample_batch = next(iter(val_loader))
                 sample_images, sample_masks = sample_batch
                 sample_images = sample_images.to(self.device)
                 sample_logits = model(sample_images)
-                
                 if sample_logits.shape[1] == 1:
                     task_type = "binary"
                     if num_classes is None:
@@ -359,24 +372,34 @@ class Evaluator:
                     task_type = "multiclass"
                     if num_classes is None:
                         num_classes = sample_logits.shape[1]
-            
-            # 执行相应的评估
+            elif task_type == "binary":
+                if num_classes is None:
+                    num_classes = 2
+            else:
+                if num_classes is None:
+                    sample_batch = next(iter(val_loader))
+                    sample_images, sample_masks = sample_batch
+                    sample_images = sample_images.to(self.device)
+                    sample_logits = model(sample_images)
+                    num_classes = sample_logits.shape[1]
+
             if task_type == "binary":
                 base_metrics = self.evaluate(model, val_loader, criterion)
             else:
-                base_metrics = self.evaluate_multiclass(model, val_loader, criterion, 
-                                                       num_classes, ignore_index)
-            
-            # 重新遍历数据收集用于高级指标计算的数据
+                base_metrics = self.evaluate_multiclass(
+                    model, val_loader, criterion,
+                    num_classes, ignore_index,
+                    exclude_metric_classes=exclude_metric_classes
+                )
+
             for images, targets in val_loader:
                 images = images.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
-                
+
                 logits = model(images)
                 all_logits.append(logits.cpu())
                 all_targets.append(targets.cpu())
-                
-                # 生成预测用于边界F1计算
+
                 if task_type == "binary":
                     if logits.dim() == 4 and logits.shape[1] == 1:
                         probs = torch.sigmoid(logits).squeeze(1)
@@ -386,28 +409,32 @@ class Evaluator:
                         preds = (probs > self.threshold).int()
                 else:
                     preds = torch.argmax(logits, dim=1)
-                
+
                 all_predictions.append(preds.cpu())
-        
-        # 合并所有批次数据
+
+                collected += images.size(0)
+                if max_samples and collected >= max_samples:
+                    break
+
+        if max_samples and collected > max_samples and len(all_logits) > 0:
+            excess = collected - max_samples
+            all_logits[-1] = all_logits[-1][: -excess]
+            all_targets[-1] = all_targets[-1][: -excess]
+            all_predictions[-1] = all_predictions[-1][: -excess]
+
         all_logits = torch.cat(all_logits, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         all_predictions = torch.cat(all_predictions, dim=0)
-        
-        # 计算校准指标
+
         calibration_metrics = self.compute_ece_nll(all_logits, all_targets)
-        
-        # 计算边界F1
         boundary_f1 = self.compute_boundary_f1(all_predictions, all_targets)
-        
-        # 生成可靠性图（如果指定了路径）
+
         reliability_stats = None
         if save_reliability_path:
             reliability_stats = self.generate_reliability_diagram(
                 all_logits, all_targets, save_reliability_path
             )
-        
-        # 合并所有指标
+
         full_metrics = {
             **base_metrics,
             "boundary_f1": boundary_f1,
@@ -416,12 +443,13 @@ class Evaluator:
             "task_type": task_type,
             "num_classes": num_classes
         }
-        
+
         if reliability_stats:
             full_metrics["reliability_stats"] = reliability_stats
-            
+
         return full_metrics
-    
+
+
     def export_kd_comparison_csv(self, metrics_dict, regime_name, teacher_model_name=None, 
                                student_model_name=None, epochs=None, training_time=None,
                                model_params=None, fps=None, notes="", save_path=None):

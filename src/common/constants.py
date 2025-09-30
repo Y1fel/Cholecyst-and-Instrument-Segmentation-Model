@@ -215,11 +215,20 @@ CLASSIFICATION_SCHEMES = {
         "target_classes": ["background", "instrument", "target_organ"],
         "mapping": {
             0: 0,   # 背景 → 背景
+            1: 0,   # abdominal_wall -> 背景
+            2: 0,   # liver -> 背景
+            3: 0,   # gastrointestinal_tract -> 背景
+            4: 0,   # fat -> 背景
             5: 1,   # Grasper → 器械
+            6: 0,   # connective_tissue -> 背景
+            7: 0,   # blood -> 背景
+            8: 0,   # cystic_duct -> 背景
             9: 1,   # L-hook → 器械  
-            10: 2   # Gallbladder → 目标器官
+            10: 2,  # Gallbladder → 目标器官
+            11: 0,  # hepatic_vein -> 背景
+            12: 0   # liver_ligament -> 背景
         },
-        "default_for_others": 0,  # 关键：未命中的都设为ignore，不是背景！
+        "default_for_others": IGNORE_INDEX,  # 关键：未命中的都设为ignore，不是背景！
         "description": "背景 vs 器械 vs 目标器官（语义对齐版本）"
     },
     
@@ -241,7 +250,7 @@ CLASSIFICATION_SCHEMES = {
             11: 2,  # hepatic_vein -> anatomical_structures
             12: 2   # liver_ligament -> anatomical_structures
         },
-        "default_for_others": 0,
+        "default_for_others": IGNORE_INDEX,
         "description": "背景 vs 器械 vs 解剖结构（平衡版本）"
     },
     
@@ -249,7 +258,7 @@ CLASSIFICATION_SCHEMES = {
         "num_classes": 5,
         "target_classes": ["background", "tissue", "liver", "surgical_instrument", "target_organ"],
         "mapping": {0: 0, 1: 1, 2: 2, 3: 1, 4: 1, 5: 3, 6: 1, 7: 1, 8: 2, 9: 3, 10: 4, 11: 2, 12: 2},
-        "default_for_others": 0,
+        "default_for_others": IGNORE_INDEX,
         "description": "背景、组织、肝脏、器械、目标器官"
     },
 
@@ -258,14 +267,20 @@ CLASSIFICATION_SCHEMES = {
         "target_classes": ["background", "liver", "fat", "gi_tract", "instrument", "gallbladder"],
         "mapping": {
             0: 0,   # 背景
+            1: 0,   # abdominal_wall -> 背景
             2: 1,   # 肝脏
-            4: 2,   # 脂肪
             3: 3,   # 消化道
+            4: 2,   # 脂肪
             5: 4,   # Grasper → 器械
+            6: 0,   # connective_tissue -> 背景
+            7: 0,   # blood -> 背景
+            8: 3,   # cystic_duct -> 消化道
             9: 4,   # L-hook → 器械（合并到同一个器械类）
-            10: 5   # 胆囊
+            10: 5,  # 胆囊
+            11: 0,  # hepatic_vein -> 背景
+            12: 0   # liver_ligament -> 背景
         },
-        "default_for_others": 255,
+        "default_for_others": IGNORE_INDEX,
         "description": "6类精细分割：背景-肝脏-脂肪-消化道-器械-胆囊"
     },
     
@@ -273,7 +288,7 @@ CLASSIFICATION_SCHEMES = {
         "num_classes": 13,
         "target_classes": list(BASE_CLASSES.values())[:13],
         "mapping": {i: i for i in range(13)},
-        "default_for_others": 255,  # ignore_index
+        "default_for_others": IGNORE_INDEX,
         "description": "完整13类分割（Kaggle标准）"
     }
 }
@@ -363,16 +378,28 @@ def compose_mapping(classification_scheme=None, custom_mapping=None, target_clas
     final_mapping = {}
     
     if custom_mapping is not None:
-        # 使用自定义映射
-        return custom_mapping
+        normalized_mapping = {}
+        for raw_key, raw_value in custom_mapping.items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid custom mapping key: {raw_key}") from exc
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid custom mapping value for key {raw_key}: {raw_value}") from exc
+            normalized_mapping[key] = value
+        return normalized_mapping
     
     if classification_scheme and classification_scheme in CLASSIFICATION_SCHEMES:
         scheme = CLASSIFICATION_SCHEMES[classification_scheme]
         semantic_to_target = scheme['mapping']
-        default_value = scheme.get('default_for_others', 255)
+        default_value = scheme.get('default_for_others', IGNORE_INDEX)
         
-        # 两阶段映射：watershed → semantic → target
         for watershed_gray, semantic_id in WATERSHED_TO_BASE_CLASS.items():
+            if watershed_gray == IGNORE_INDEX:
+                final_mapping[watershed_gray] = IGNORE_INDEX
+                continue
             if semantic_id in semantic_to_target:
                 final_mapping[watershed_gray] = semantic_to_target[semantic_id]
             else:
@@ -380,7 +407,6 @@ def compose_mapping(classification_scheme=None, custom_mapping=None, target_clas
         
         return final_mapping
     
-    # 默认情况：直接使用watershed到语义的映射
     return WATERSHED_TO_BASE_CLASS
 
 def generate_selective_mapping(target_classes):
