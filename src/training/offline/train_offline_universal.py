@@ -315,94 +315,48 @@ def load_config(config_path):
         raise ValueError(f"Error loading config: {e}")
 
 # get default parser value
-def get_parser_default(param_name):
-    # Create a temporary parser to get default values
-    temp_parser = argparse.ArgumentParser()
-
-    # Redefine all parameters here (only key ones listed)
-    # Add more as needed based on actual usage
-    defaults = {
-        'epochs': 5,
-        'batch_size': 6,
-        'lr': 0.0003,
-        'num_classes': 10,
-        'val_ratio': 0.2,
-        'num_workers': 4,
-        'img_size': 512,
-        'monitor_interval': 5,
-        'viz_samples': 50,
-        'optimizer': 'adamw',
-        'scheduler': 'cosine',
-        'weight_decay': 0.0001,
-        'early_stopping': False,    # Short-term training default: disabled
-        'patience': 5,              # Long-term training recommended value
-        'val_interval': 1,          # Validate every epoch
-        'save_interval': 1,         # Save checkpoint every x epochs
-        'flip_prob': 0.5,
-        'rotation_degree': 15,
-        'apply_fov_mask': False,
-        # 添加模型相关默认值
-        'model': 'unet_min',
-        # 添加蒸馏相关默认值
-        'enable_distillation': False,
-        'teacher_model': 'unet_plus_plus',
-        'teacher_checkpoint': None,
-        'student_model': 'mobile_unet',
-        'distill_temperature': 4.0,
-        'distill_alpha': 0.7,
-        'distill_beta': 0.3,
-        'distill_feature_weight': 0.1,
-        # 添加分类相关默认值
-        'binary': False,
-        'classification_scheme': None,
-        'target_classes': None,
-        'custom_mapping_file': None,
-        # 添加可视化相关默认值
-        'save_viz': False,
-        'enable_gpu_monitor': False,
-        'augment': False,
-        'debug': False,
-        'save_best_only': True,
-        # 添加高级损失相关默认值
-        'loss_type': 'ce',
-        'dice_weight': 0.0,
-        'use_focal_loss': False,
-        'focal_alpha': 1.0,
-        'focal_gamma': 2.0,
-        'label_smoothing': 0.0,
-        'auto_class_weights': False,
-        'class_weight_sample_ratio': 0.1,
-        'early_stopping_metric': 'loss',
-    }
-    
-    return defaults.get(param_name, None)
-
 # combine config with arguments
 def merge_config_with_args(args, config):
     if not config:
         return args
 
-    # Record which parameters are overridden by the config file
-    overridden = []
-    
-    for key, value in config.items():
-        if hasattr(args, key):
-            # Only use config file value if command line argument is default
-            current_value = getattr(args, key)
-            parser_default = get_parser_default(key)
+    cli_keys = set()
+    raw_cli = sys.argv[1:]
+    skip_next = False
+    for idx, token in enumerate(raw_cli):
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith('--'):
+            key = token[2:]
+            if '=' in key:
+                key = key.split('=', 1)[0]
+            else:
+                next_index = idx + 1
+                if next_index < len(raw_cli) and not raw_cli[next_index].startswith('--'):
+                    skip_next = True
+            cli_keys.add(key.replace('-', '_'))
 
-            # Only override if current value is default AND config value is different
-            if current_value == parser_default and current_value != value:
-                setattr(args, key, value)
-                overridden.append(f"{key}: {current_value} -> {value}")
-    
+    overridden = []
+
+    for key, value in config.items():
+        if not hasattr(args, key):
+            continue
+        if key in cli_keys:
+            continue
+
+        current_value = getattr(args, key)
+        if current_value != value:
+            setattr(args, key, value)
+            overridden.append(f"{key}: {current_value} -> {value}")
+
     if overridden:
-        print("CONFIG OVERRIDES:")
-        for override in overridden:
-            print(f"   - {override}")
+        print('CONFIG OVERRIDES:')
+        for item in overridden:
+            print(f'   - {item}')
     else:
-        print("CONFIG: Using default values, no overrides needed")
-    
+        print('CONFIG: Using default values, no overrides needed')
+
     return args
 
 # video-aware train/val split to prevent video-level leakage
