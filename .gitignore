@@ -226,6 +226,7 @@ splits/*
 *.npz
 *.npy
 
+tmp/
 # 编辑器/系统
 .vscode/
 .idea/
@@ -265,3 +266,6 @@ configs/experiments/test_split_strategies.yaml
 offline_dataset_health_checks_summary.md
 project_structure_final_update_report.md
 PROJECT_STRUCTURE copy.md
+scripts/visualize_gt_mapping.py
+docs/GT_Mapping_Visualization_Guide.md
+docs/Multi_Classification_Training_Guide.md

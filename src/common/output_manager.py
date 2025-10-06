@@ -1,7 +1,7 @@
 # 
 import os, csv, json, torch
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 class OutputManager:
     def __init__(self, model_type: str = "baseline", output_dir: str = "./outputs", run_dir: str = None):
@@ -282,6 +282,27 @@ class OutputManager:
 
         with open(best_record_path, 'w') as f:
             json.dump(best_info, f, indent=2)  
+
+    def get_best_model_path(self, model_suffix: str = "") -> Optional[str]:
+        checkpoints_dir = self.get_checkpoints_dir()
+        model_name = f"{self.model_type}_{model_suffix}" if model_suffix else self.model_type
+        candidate = os.path.join(checkpoints_dir, f"{model_name}_best.pth")
+        if os.path.exists(candidate):
+            return candidate
+
+        record_path = os.path.join(self.run_dir, "best_model_info.json")
+        if os.path.exists(record_path):
+            try:
+                with open(record_path, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                stored_path = info.get("model_path")
+                if stored_path and os.path.exists(stored_path):
+                    return stored_path
+            except (OSError, json.JSONDecodeError):
+                return None
+
+        return None
+
 
     # get latest checkpoint
     def _get_latest_checkpoint(self) -> str:

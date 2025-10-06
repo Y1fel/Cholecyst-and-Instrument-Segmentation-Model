@@ -75,6 +75,7 @@ def parse_args():
     p.add_argument("--enable_gpu_monitor", action='store_true', default=True, help="Enable GPU monitoring")
     p.add_argument("--save_viz", action='store_true', help="Save visualizations")
     p.add_argument("--viz_samples", type=int, default=50, help="Number of visualization samples")
+    p.add_argument("--exclude_background_metrics", action='store_true', default=False, help="Exclude background class when computing aggregate metrics (mIoU/mDice/mAcc)")
     
     # 调试和高级选项
     p.add_argument("--debug", action='store_true', help="Enable debug mode")
@@ -203,6 +204,8 @@ def parse_args():
                    help="Resume training from checkpoint directory (e.g., outputs/model_20250911_230321/checkpoints)")
     p.add_argument("--resume_from_best", action='store_true', default=False,
                    help="Resume from best checkpoint instead of latest epoch checkpoint")
+    p.add_argument("--resume_new_run", action='store_true', default=False,
+                   help="When resuming, create a new output run instead of reusing the original directory")
     
     # 恢复时可选的参数覆盖（预留扩展）
     p.add_argument("--resume_lr", type=float, default=None,
@@ -223,8 +226,12 @@ def parse_args():
 
 # validate arguments
 def validate_args(args):
+    if getattr(args, "exclude_background_metrics", False):
+        print("NOTE: Aggregate metrics will exclude background class (id=0)")
     errors = []    # storage for error messages
     warnings = []  # storage for warning messages
+    if getattr(args, "resume_new_run", False) and not args.resume:
+        warnings.append("--resume_new_run is set but --resume is missing; option will be ignored")
 
     # Basic parameter validation
     if args.epochs <= 0:
@@ -840,6 +847,8 @@ def create_optimizer(model, args):
 
 # build scheduler
 def create_scheduler(optimizer, args):
+    from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
     if args.scheduler == "none":
         return None
     elif args.scheduler == "step":
@@ -848,6 +857,11 @@ def create_scheduler(optimizer, args):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     elif args.scheduler == "plateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    elif args.scheduler == "cosine_warmup":
+        warmup = max(2, int(0.1 * args.epochs))  # 前 10% epoch 线性升温
+        sched1 = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup)
+        sched2 = CosineAnnealingLR(optimizer, T_max=args.epochs - warmup)
+        return SequentialLR(optimizer, schedulers=[sched1, sched2], milestones=[warmup])
     else:
         raise ValueError(f"Unknown scheduler: {args.scheduler}")
     
@@ -895,7 +909,10 @@ def train_one_epoch(
         else:
             logits = model(images)
             if args.binary:
-                loss = criterion(logits, masks) # BCEWithLogitsLoss(logits, targets)
+                target = masks.float()
+                if target.dim() == 3:
+                    target = target.unsqueeze(1)
+                loss = criterion(logits, target)
             else:
                 targets = masks.long()
                 loss = criterion(logits, targets)
@@ -951,7 +968,6 @@ def train_one_epoch(
 # Validation
 @torch.inference_mode()
 def validate(model, loader, criterion, device, args):
-    # 在蒸馏模式下，创建标准验证损失
     if args.enable_distillation:
         if args.binary:
             val_criterion = nn.BCEWithLogitsLoss()
@@ -959,7 +975,9 @@ def validate(model, loader, criterion, device, args):
             val_criterion = nn.CrossEntropyLoss(ignore_index=255)
     else:
         val_criterion = criterion
-    
+
+    exclude_metric_classes = [0] if getattr(args, "exclude_background_metrics", False) else None
+
     if args.binary:
         evaluator = Evaluator(device=device, threshold=0.5)
         return evaluator.evaluate(model, loader, val_criterion)
@@ -968,7 +986,8 @@ def validate(model, loader, criterion, device, args):
         return evaluator.evaluate_multiclass(
             model, loader, val_criterion,
             num_classes = args.num_classes,
-            ignore_index = 255
+            ignore_index = 255,
+            exclude_metric_classes = exclude_metric_classes
         )
 
 # Main function
@@ -996,8 +1015,9 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
     
     # Initialize components
     evaluator = Evaluator(device=device)
-    distill_visualizer = DistillationVisualizer(output_mgr.get_vis_dir(), device)
-    visualizer = Visualizer()
+    distill_visualizer = DistillationVisualizer(output_mgr.get_vis_dir(), device, classification_scheme=args.classification_scheme)
+    visualizer = Visualizer(classification_scheme=args.classification_scheme)
+    exclude_metric_classes = [0] if getattr(args, "exclude_background_metrics", False) else None
     
     print(f"📊 Experiment: {experiment_name}")
     print(f"📁 Output Directory: {output_mgr.get_run_dir()}")
@@ -1012,7 +1032,8 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
         teacher_model, val_loader, 
         num_classes=args.num_classes,
         binary_mode=args.binary,
-        max_samples=args.evidence_samples
+        max_samples=args.evidence_samples,
+        exclude_metric_classes=exclude_metric_classes
     )
     print(f"      ✅ Teacher - IoU: {teacher_metrics.get('iou', teacher_metrics.get('miou', 0)):.4f}")
     
@@ -1022,7 +1043,8 @@ def generate_kd_evidence_package(args, teacher_model, student_model, val_loader,
         student_model, val_loader,
         num_classes=args.num_classes, 
         binary_mode=args.binary,
-        max_samples=args.evidence_samples
+        max_samples=args.evidence_samples,
+        exclude_metric_classes=exclude_metric_classes
     )
     print(f"      ✅ Student - IoU: {student_metrics.get('iou', student_metrics.get('miou', 0)):.4f}")
     
@@ -1166,22 +1188,20 @@ def load_resume_states(model, optimizer, scheduler, resume_info, device):
 def main():
     args = parse_args()
 
-    # setup resume training
+    config = load_config(args.config)
+    args = merge_config_with_args(args, config)
+
     resume_manager, resume_info, start_epoch = setup_resume_training(args)
 
-    # apply resume overrides
     if resume_manager:
         apply_resume_overrides(args)
 
-    # load config and validate args
-    config = load_config(args.config)
-    args = merge_config_with_args(args, config)
     validate_args(args)
 
-    # Binary/Multiclass 强一致性保护：自动修正 num_classes
+    # Binary/Multiclass strong consistency: fix num_classes when needed
     if args.binary:
         if args.num_classes != 2:
-            print(f"[WARN] binary=True 但 num_classes={args.num_classes} != 2，自动将 num_classes 置为 2")
+            print(f"[WARN] binary=True but num_classes={args.num_classes} != 2, forcing num_classes to 2")
             args.num_classes = 2
 
     # Print save strategy description
@@ -1207,18 +1227,21 @@ def main():
         model_tag = f"distill_{args.teacher_model}_to_{args.student_model}"
     else:
         model_tag = args.model if args.model_type is None else args.model_type
-    
-    # 恢复训练时使用原来的输出目录
-    if resume_manager:
-        # 使用原来的run目录
-        original_run_dir = resume_info['run_dir']
-        output_mgr = OutputManager(model_type=model_tag, run_dir=original_run_dir)
-        print(f"=== RESUME: Using original output directory: {original_run_dir} ===")
-    else:
-        # 正常训练：创建新的输出目录
-        output_mgr = OutputManager(model_type=model_tag)
-        output_mgr.save_config(vars(args))  # 正常训练时保存配置
 
+    resume_source_run_dir = None
+    if resume_manager:
+        original_run_dir = resume_info["run_dir"]
+        resume_source_run_dir = original_run_dir
+        if getattr(args, "resume_new_run", False):
+            output_mgr = OutputManager(model_type=model_tag)
+            output_mgr.save_config(vars(args))
+            print(f"=== RESUME: Starting new output directory: {output_mgr.get_run_dir()} (source: {original_run_dir}) ===")
+        else:
+            output_mgr = OutputManager(model_type=model_tag, run_dir=original_run_dir)
+            print(f"=== RESUME: Using original output directory: {original_run_dir} ===")
+    else:
+        output_mgr = OutputManager(model_type=model_tag)
+        output_mgr.save_config(vars(args))  # save config for fresh training
     # load custom mapping
     custom_mapping = None
     if args.custom_mapping_file:
@@ -1453,6 +1476,8 @@ def main():
         "seed": 42,
         "optimizer": args.optimizer,
         "scheduler": args.scheduler,
+        "exclude_background_metrics": getattr(args, "exclude_background_metrics", False),
+        "resume_source_run_dir": resume_source_run_dir,
         "num_classes": args.num_classes
     }
     
@@ -1808,7 +1833,7 @@ def main():
             print("WARNING: Best model not found, using current model for visualization")
         
         print("-- Saving Visualizations --")
-        visualizer = Visualizer()
+        visualizer = Visualizer(classification_scheme=args.classification_scheme)
         viz_dir = output_mgr.get_vis_dir() # Get visualization directory
 
         # Save visualization results
@@ -1822,7 +1847,7 @@ def main():
         # 蒸馏模式特有的可视化
         if args.enable_distillation and DISTILLATION_AVAILABLE:
             print("-- Generating Distillation Analysis --")
-            distill_visualizer = DistillationVisualizer(viz_dir, device)
+            distill_visualizer = DistillationVisualizer(viz_dir, device, classification_scheme=args.classification_scheme)
             
             # Teacher-Student预测对比
             distill_visualizer.visualize_prediction_comparison(
@@ -1892,7 +1917,7 @@ def main():
     
     # 保存指标曲线图
     if 'monitor' in locals():
-        viz_visualizer = Visualizer()
+        viz_visualizer = Visualizer(classification_scheme=args.classification_scheme)
         metrics_history = monitor.get_metrics_history()
         if metrics_history:
             curves_path = output_mgr.get_viz_path("training_curves.png")

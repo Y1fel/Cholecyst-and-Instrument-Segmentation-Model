@@ -126,6 +126,7 @@ class SegDatasetMin(Dataset):
                 target_classes=target_classes
             )
             self.class_id_map = self.mapping
+            self.ws2train = self.class_id_map
             self.classification_scheme = classification_scheme
             print(f"[DATASET] Using legacy mapping scheme: {classification_scheme}")
 
@@ -256,37 +257,46 @@ class SegDatasetMin(Dataset):
 
         # === 多类分支：标准两段式映射（唯一来源） ===
         if not self.is_binary:
-            # 读取到的 mask 是 WS 灰度图：11/12/13/21/22/31/32/50/255/...
             ws = mask
 
-            # 先全部置为 ignore，再按映射覆写（O(N) 向量化）
             m = np.full_like(ws, fill_value=self.ignore_index, dtype=np.uint8)
 
-            # 逐项写入（最稳妥，且易于审计）
             for ws_val, train_id in self.ws2train.items():
                 m[ws == ws_val] = train_id
 
-            # （可选）安全网：如果还存在“未在映射表中但又不是 255 的灰度”，统统设为 ignore
             unknown = (m == self.ignore_index) & (ws != 255)
             if np.any(unknown):
-                # 这里保持 ignore，不要自动归 0，避免把未知类当背景污染监督
                 pass
 
-            # 统计/调试：仅首批样本打印一次
             if index < 3:
                 uniques, counts = np.unique(m, return_counts=True)
-                # print(f"[MAP DEBUG] train ids in sample#{index}: {dict(zip(uniques.tolist(), counts.tolist()))}")
 
-            # 最近邻缩放，保持离散标签
             m = cv2.resize(m, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
 
             if self.apply_fov_mask:
-                fov = compute_fov_mask_from_rgb(rgb_uint8_resized)  # True=视野内
-                # 选择一种：训练推荐置背景0；评测/可视化若想忽略可用 255
-                m[~fov] = 0   # 或者 m[~fov] = self.ignore_index
-                
+                fov = compute_fov_mask_from_rgb(rgb_uint8_resized)
+                m[~fov] = 0
+
             mask_tensor = torch.from_numpy(m).long()
             return img_tensor, mask_tensor
+
+        mapping_source = getattr(self, "ws2train", self.class_id_map)
+        binary_mask = np.zeros_like(mask, dtype=np.uint8)
+
+        for ws_val, train_id in mapping_source.items():
+            if train_id == self.ignore_index:
+                continue
+            binary_mask[mask == ws_val] = train_id
+
+        binary_mask = cv2.resize(binary_mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+
+        if self.apply_fov_mask:
+            fov = compute_fov_mask_from_rgb(rgb_uint8_resized)
+            binary_mask[~fov] = 0
+
+        binary_mask = binary_mask.astype(np.float32)
+        mask_tensor = torch.from_numpy(binary_mask)
+        return img_tensor, mask_tensor
 
     def _get_multiclass_mask_candidates(self, stem):
         """多分类任务的mask候选列表（watershed优先）"""

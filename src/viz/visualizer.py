@@ -6,11 +6,34 @@ import cv2
 from typing import Optional
 
 class Visualizer:
-    def __init__(self):
+    def __init__(self, classification_scheme: Optional[str] = None, class_names=None):
         self.colors = {
             'pred_overlay': (0, 255, 0),  # Green
             'groundtruth_overlay': (255, 0, 0)  # Red
         }
+        self.classification_scheme = classification_scheme
+        self.class_names = self._build_class_names(classification_scheme, class_names)
+
+    def _build_class_names(self, classification_scheme, class_names):
+        from src.common.constants import CLASSES, CLASSIFICATION_SCHEMES
+        if isinstance(class_names, dict):
+            return class_names
+        if isinstance(class_names, (list, tuple)):
+            return {idx: name for idx, name in enumerate(class_names)}
+        if classification_scheme:
+            scheme_key = classification_scheme.lower() if isinstance(classification_scheme, str) else classification_scheme
+            scheme = CLASSIFICATION_SCHEMES.get(scheme_key)
+            if scheme:
+                target_classes = scheme.get('target_classes', [])
+                return {idx: name for idx, name in enumerate(target_classes)}
+        return CLASSES
+
+    def get_class_name(self, class_id):
+        try:
+            class_id = int(class_id)
+        except (TypeError, ValueError):
+            return f"Class_{class_id}"
+        return self.class_names.get(class_id, f"Class_{class_id}")
                        
     def create_overlay_image(
             self, 
@@ -48,7 +71,7 @@ class Visualizer:
             
             # 处理预测结果
             for class_id in pred_unique:
-                if class_id == 0:  # 跳过背景
+                if class_id in (0, 255):  # 跳过背景/忽略
                     continue
                     
                 # 创建当前类别的二值mask
@@ -72,7 +95,7 @@ class Visualizer:
             if groundtruth_mask is not None:
                 gt_unique = np.unique(groundtruth_mask)
                 for class_id in gt_unique:
-                    if class_id == 0:  # 跳过背景
+                    if class_id in (0, 255):  # 跳过背景/忽略
                         continue
                         
                     # 创建当前类别的二值mask
@@ -363,7 +386,6 @@ class Visualizer:
         
         # 如果是多分类，添加颜色图例
         if is_multiclass:
-            from src.common.constants import CLASSES
             legend_start_y = h - 150
             legend_box_size = 15
             
@@ -374,7 +396,7 @@ class Visualizer:
                 # 遍历所有出现的类别
                 all_classes = set(gt_unique) | set(pred_unique)
                 for i, class_id in enumerate(sorted(all_classes)):
-                    if class_id == 0:  # 跳过背景
+                    if class_id in (0, 255):  # 跳过背景/忽略
                         continue
                         
                     y_pos = legend_start_y + i * 25
@@ -392,7 +414,7 @@ class Visualizer:
                                 color, -1)
                     
                     # 添加类别名称
-                    class_name = CLASSES.get(int(class_id), f"Class_{class_id}")
+                    class_name = self.get_class_name(class_id)
                     cv2.putText(combined, class_name, 
                               (legend_x + legend_box_size + 5, y_pos + 12), 
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
