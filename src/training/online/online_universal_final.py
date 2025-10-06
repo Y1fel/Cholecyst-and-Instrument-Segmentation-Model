@@ -36,6 +36,7 @@ from src.common.pseudo_label_quality import (
     denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
 )
 from src.common.ema_safety import EMASafetyManager
+from src.common.pseudo_label_generator import PseudoLabelGenerator
 
 # 模型导入
 from src.models.model_zoo import build_model
@@ -465,7 +466,10 @@ class OnlineLearner:
         self.output_mgr = output_mgr
         self.monitor = monitor
         self.global_frame_idx = 0
-
+        self.pseudo_label_generator = PseudoLabelGenerator(
+            initial_teacher_weight=0.8,
+            min_teacher_weight=0.05
+        )
         self.criterion = nn.BCEWithLogitsLoss() if args.binary else nn.CrossEntropyLoss()
 
         # 优化器
@@ -484,7 +488,7 @@ class OnlineLearner:
         self.visualizer = Visualizer()
         self.loss_history = []
         self.metrics_history = []
-        self.step_time_history = []  # 记录每个step的用时
+        self.step_time_history = []
         self.miou_history = []
 
         # 增强版replay buffer
@@ -679,7 +683,6 @@ def streaming_online_loop(args, learner, video_fps=25):
                 step_ms = (time.time() - step_t0) * 1000.0
                 recent_step_ms.append(step_ms)
                 learner.step_time_history.append(step_ms)
-
                 if len(recent_step_ms) > 50:
                     recent_step_ms.pop(0)
 
@@ -703,7 +706,7 @@ def streaming_online_loop(args, learner, video_fps=25):
 
             # 检查步数限制
             if int(args.online_steps) > 0 and learner.global_step >= int(args.online_steps):
-                print("[INFO] Reached online_steps limit. Stopping streaming loop.")
+                print(f"[INFO] Reached online_steps limit ({args.online_steps}). Current global_step: {learner.global_step}. Stopping streaming loop.")
                 break
 
     finally:
@@ -752,47 +755,49 @@ def _process_training_frames(selected_frames, learner, args, device):
             except Exception as e:
                 print(f"[Step {learner.global_step}] Student预测去噪异常: {e}")
 
-        # Teacher 伪标签生成 + 质控
+        # 使用新的混合伪标签生成机制
         pseudo_targets = None
         teacher_confidence = None
-        qc_pass = False
+        student_confidence = None
+        use_pseudo_labels = False
 
         if learner.offline_model is not None:
+            learner.model.eval()
             with torch.no_grad():
-                tlogits = learner.offline_model(img_tensor)
-                if tlogits.shape[1] == 1:
-                    tprobs = torch.sigmoid(tlogits).cpu().numpy()
-                    pseudo_np = (tprobs > 0.5).astype(np.uint8)[:, 0, ...]
-                    teacher_probs_np = tprobs
-                    # 计算teacher置信度
-                    teacher_confidence = float(np.mean(np.max([tprobs, 1 - tprobs], axis=0)))
-                else:
-                    tsoft = torch.softmax(tlogits, dim=1)
-                    tprobs = tsoft.cpu().numpy()
-                    pseudo_np = np.argmax(tprobs, axis=1)
-                    teacher_probs_np = tprobs
-                    # 计算teacher置信度（最大概率的均值）
-                    teacher_confidence = float(np.mean(np.max(tprobs, axis=1)))
+                # 获取student logits
+                student_logits = learner.model(img_tensor)
 
-            try:
-                pseudo_np = denoise_pseudo_label(pseudo_np, min_area=100, morph_op='open',
-                                                 morph_structure=np.ones((3, 3)))
-                pixel_masks = pixel_gate_mask(teacher_probs_np, pseudo_np)
-                mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs_np, pseudo_np, pixel_masks)
-                mask_ok = np.asarray(mask_ok).astype(bool).ravel()
-                qc_pass = bool(mask_ok.any())
-            except Exception as e:
-                print(f"[Step {learner.global_step}] 质控异常: {e}")
-                mask_ok = np.array([True], dtype=bool)
-                qc_pass = True
+                # 获取teacher logits
+                teacher_logits = learner.offline_model(img_tensor)
 
-            if qc_pass:
-                keep_idx = np.where(mask_ok)[0]
-                pseudo_np_kept = pseudo_np[keep_idx]
-                if args.binary:
-                    pseudo_targets = torch.from_numpy(pseudo_np_kept).float().unsqueeze(1).to(device)
+                # 使用新的伪标签生成器生成混合标签
+                hybrid_labels, teacher_conf, student_conf, current_teacher_weight, debug_info = \
+                    learner.pseudo_label_generator.generate_hybrid_labels(
+                        teacher_logits, student_logits,
+                        current_loss=learner.loss_history[-1] if learner.loss_history else None,
+                        binary_task=args.binary
+                    )
+
+                # 判断是否使用伪标签
+                use_pseudo_labels = learner.pseudo_label_generator.should_use_pseudo_labels(
+                    teacher_conf, student_conf, min_confidence=0.9
+                )
+
+                if use_pseudo_labels:
+                    if args.binary:
+                        pseudo_targets = hybrid_labels.float().unsqueeze(1)
+                    else:
+                        pseudo_targets = hybrid_labels.long()
+
+                    teacher_confidence = teacher_conf
+                    student_confidence = student_conf
+
+                    print(f"[Step {learner.global_step}] 使用混合伪标签: teacher_conf={teacher_conf:.3f}, "
+                          f"student_conf={student_conf:.3f}, teacher_weight={current_teacher_weight:.3f}, "
+                          f"student_superior={debug_info['student_superior']}")
                 else:
-                    pseudo_targets = torch.from_numpy(pseudo_np_kept).long().to(device)
+                    print(f"[Step {learner.global_step}] 置信度不足，跳过伪标签: teacher_conf={teacher_conf:.3f}, "
+                          f"student_conf={student_conf:.3f}")
 
                 # ===== 保存伪标签图和叠加图（每50步保存一次） =====
                 if learner.global_step % 50 == 0:
@@ -805,7 +810,13 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                         # 伪标签彩色渲染
                         cmap = plt.get_cmap("tab10", args.offline_num_classes)
-                        pred_mask = pseudo_np[0] if pseudo_np.ndim == 3 else pseudo_np
+                        # 转换混合标签为numpy用于可视化
+                        if pseudo_targets is not None:
+                            pred_mask = pseudo_targets[0].detach().cpu().numpy()
+                            if pred_mask.ndim == 1:
+                                pred_mask = pred_mask.reshape(args.img_size, args.img_size)
+                        else:
+                            continue  # 跳过可视化保存
                         colored_mask = cmap(pred_mask / (args.offline_num_classes - 1))[:, :, :3]
                         colored_mask = (colored_mask * 255).astype(np.uint8)
 
@@ -828,7 +839,7 @@ def _process_training_frames(selected_frames, learner, args, device):
                         print(f"[Step {learner.global_step}] 保存伪标签可视化失败: {e}")
 
         # Student 模型更新
-        if pseudo_targets is not None and pseudo_targets.shape[0] > 0:
+        if use_pseudo_labels and pseudo_targets is not None and pseudo_targets.shape[0] > 0:
             learner.model.train()
             learner.optimizer.zero_grad()
 
@@ -861,6 +872,7 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                     learner.loss_history.append(loss_val)
 
+                    # 计算当前batch的IoU
                     with torch.no_grad():
                         if args.binary:
                             pred_mask = (torch.sigmoid(out) > 0.5).long()
