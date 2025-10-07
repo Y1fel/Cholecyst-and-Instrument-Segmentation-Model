@@ -117,6 +117,9 @@ def parse_args():
     p.add_argument("--save_pseudo_labels", action='store_true', default=False, help="保存通过质控的伪标签到本地")
     p.add_argument("--pseudo_save_dir", type=str, default=None, help="伪标签保存目录")
 
+    p.add_argument("--teacher_only", action='store_true', default=False,
+                   help="仅使用teacher伪标签（默认使用混合标签）")
+
     return p.parse_args()
 
 
@@ -760,7 +763,7 @@ def _process_training_frames(selected_frames, learner, args, device):
             except Exception as e:
                 print(f"[Step {learner.global_step}] Student预测去噪异常: {e}")
 
-        # 使用新的混合伪标签生成机制
+        # 使用新的混合伪标签生成机制 OR 纯teacher伪标签
         pseudo_targets = None
         teacher_confidence = None
         student_confidence = None
@@ -769,80 +772,110 @@ def _process_training_frames(selected_frames, learner, args, device):
         if learner.offline_model is not None:
             learner.model.eval()
             with torch.no_grad():
-                # 获取student logits
-                student_logits = learner.model(img_tensor)
-
                 # 获取teacher logits
                 teacher_logits = learner.offline_model(img_tensor)
 
-                # 使用新的伪标签生成器生成混合标签
-                hybrid_labels, teacher_conf, student_conf, current_teacher_weight, debug_info = \
-                    learner.pseudo_label_generator.generate_hybrid_labels(
-                        teacher_logits, student_logits,
-                        current_loss=learner.loss_history[-1] if learner.loss_history else None,
-                        binary_task=args.binary
+                # ========== 条件判断：混合标签 or 纯teacher ==========
+                if not args.teacher_only:
+                    # 混合标签模式（原有逻辑）
+                    student_logits = learner.model(img_tensor)
+
+                    hybrid_labels, teacher_conf, student_conf, current_teacher_weight, debug_info = \
+                        learner.pseudo_label_generator.generate_hybrid_labels(
+                            teacher_logits, student_logits,
+                            current_loss=learner.loss_history[-1] if learner.loss_history else None,
+                            binary_task=args.binary
+                        )
+
+                    if not hasattr(learner, '_temp_pred_confs'):
+                        learner._temp_pred_confs = []
+                        learner._temp_pseudo_confs = []
+                        learner._temp_entropies = []
+
+                    learner._temp_pred_confs.append(student_conf)
+                    learner._temp_pseudo_confs.append(teacher_conf)
+
+                    teacher_probs = torch.softmax(teacher_logits, dim=1)
+                    entropy = -torch.sum(teacher_probs * torch.log(teacher_probs + 1e-10), dim=1).mean().item()
+                    learner._temp_entropies.append(entropy)
+
+                    use_pseudo_labels = learner.pseudo_label_generator.should_use_pseudo_labels(
+                        teacher_conf, student_conf, min_confidence=0.9
                     )
 
-                if not hasattr(learner, '_temp_pred_confs'):
-                    learner._temp_pred_confs = []
-                    learner._temp_pseudo_confs = []
-                    learner._temp_entropies = []
+                    if use_pseudo_labels:
+                        if args.binary:
+                            pseudo_targets = hybrid_labels.float().unsqueeze(1)
+                        else:
+                            pseudo_targets = hybrid_labels.long()
 
-                learner._temp_pred_confs.append(student_conf)
-                learner._temp_pseudo_confs.append(teacher_conf)
+                        teacher_confidence = teacher_conf
+                        student_confidence = student_conf
 
-                teacher_probs = torch.softmax(teacher_logits, dim=1)
-                entropy = -torch.sum(teacher_probs * torch.log(teacher_probs + 1e-10), dim=1).mean().item()
-                learner._temp_entropies.append(entropy)
-
-                # 判断是否使用伪标签
-                use_pseudo_labels = learner.pseudo_label_generator.should_use_pseudo_labels(
-                    teacher_conf, student_conf, min_confidence=0.9
-                )
-
-                if use_pseudo_labels:
-                    if args.binary:
-                        pseudo_targets = hybrid_labels.float().unsqueeze(1)
+                        print(f"[Step {learner.global_step}] 混合伪标签: teacher={teacher_conf:.3f}, "
+                              f"student={student_conf:.3f}, weight={current_teacher_weight:.3f}")
                     else:
-                        pseudo_targets = hybrid_labels.long()
+                        print(f"[Step {learner.global_step}] 置信度不足，跳过")
 
-                    teacher_confidence = teacher_conf
-                    student_confidence = student_conf
-
-                    print(f"[Step {learner.global_step}] 使用混合伪标签: teacher_conf={teacher_conf:.3f}, "
-                          f"student_conf={student_conf:.3f}, teacher_weight={current_teacher_weight:.3f}, "
-                          f"student_superior={debug_info['student_superior']}")
                 else:
-                    print(f"[Step {learner.global_step}] 置信度不足，跳过伪标签: teacher_conf={teacher_conf:.3f}, "
-                          f"student_conf={student_conf:.3f}")
+                    # 纯Teacher模式（v4逻辑）
+                    if teacher_logits.shape[1] == 1:
+                        tprobs = torch.sigmoid(teacher_logits).cpu().numpy()
+                        pseudo_np = (tprobs > 0.5).astype(np.uint8)[:, 0, ...]
+                        teacher_probs_np = tprobs
+                        teacher_confidence = float(np.mean(np.max([tprobs, 1 - tprobs], axis=0)))
+                    else:
+                        tsoft = torch.softmax(teacher_logits, dim=1)
+                        tprobs = tsoft.cpu().numpy()
+                        pseudo_np = np.argmax(tprobs, axis=1)
+                        teacher_probs_np = tprobs
+                        teacher_confidence = float(np.mean(np.max(tprobs, axis=1)))
 
-                # ===== 保存伪标签图和叠加图（每50步保存一次） =====
-                if learner.global_step % 50 == 0:
+                    try:
+                        pseudo_np = denoise_pseudo_label(pseudo_np, min_area=100, morph_op='open',
+                                                         morph_structure=np.ones((3, 3)))
+                        pixel_masks = pixel_gate_mask(teacher_probs_np, pseudo_np)
+                        mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs_np, pseudo_np, pixel_masks)
+                        mask_ok = np.asarray(mask_ok).astype(bool).ravel()
+                        use_pseudo_labels = bool(mask_ok.any())
+                    except Exception as e:
+                        print(f"[Step {learner.global_step}] 质控异常: {e}")
+                        mask_ok = np.array([True], dtype=bool)
+                        use_pseudo_labels = True
+
+                    if use_pseudo_labels:
+                        keep_idx = np.where(mask_ok)[0]
+                        pseudo_np_kept = pseudo_np[keep_idx]
+                        if args.binary:
+                            pseudo_targets = torch.from_numpy(pseudo_np_kept).float().unsqueeze(1).to(device)
+                        else:
+                            pseudo_targets = torch.from_numpy(pseudo_np_kept).long().to(device)
+
+                        print(f"[Step {learner.global_step}] Teacher伪标签: conf={teacher_confidence:.3f}")
+                    else:
+                        print(f"[Step {learner.global_step}] Teacher质控未通过")
+
+                # 可视化保存（两种模式共用）
+                if learner.global_step % 50 == 0 and pseudo_targets is not None:
                     try:
                         save_dir = args.pseudo_save_dir
                         os.makedirs(save_dir, exist_ok=True)
 
-                        # 原始图像
-                        img_vis = frame_item.rgb_np  # HxWx3 uint8
-
-                        # 伪标签彩色渲染
+                        img_vis = frame_item.rgb_np
                         cmap = plt.get_cmap("tab10", args.offline_num_classes)
-                        # 转换混合标签为numpy用于可视化
-                        if pseudo_targets is not None:
-                            pred_mask = pseudo_targets[0].detach().cpu().numpy()
-                            if pred_mask.ndim == 1:
-                                pred_mask = pred_mask.reshape(args.img_size, args.img_size)
-                        else:
-                            continue  # 跳过可视化保存
-                        colored_mask = cmap(pred_mask / (args.offline_num_classes - 1))[:, :, :3]
+
+                        pred_mask = pseudo_targets[0].detach().cpu().numpy()
+                        if pred_mask.ndim == 3:
+                            pred_mask = pred_mask[0]
+
+                        colored_mask = cmap(pred_mask / max(1, args.offline_num_classes - 1))[:, :, :3]
                         colored_mask = (colored_mask * 255).astype(np.uint8)
 
-                        # 叠加
                         alpha = 0.4
                         overlay = cv2.addWeighted(img_vis, 1 - alpha, colored_mask, alpha, 0)
 
-                        # 保存文件名
-                        base_name = f"frame_{frame_item.index:06d}"
+                        mode_tag = "teacher" if args.teacher_only else "hybrid"
+                        base_name = f"frame_{frame_item.index:06d}_{mode_tag}"
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_original.png"),
                                     cv2.cvtColor(img_vis, cv2.COLOR_RGB2BGR))
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_pseudo.png"),
@@ -850,10 +883,10 @@ def _process_training_frames(selected_frames, learner, args, device):
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_overlay.png"),
                                     cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
-                        print(f"[INFO] Saved pseudo-label visualization to {save_dir}/{base_name}_overlay.png")
+                        print(f"[INFO] Saved {mode_tag} label: {save_dir}/{base_name}_overlay.png")
 
                     except Exception as e:
-                        print(f"[Step {learner.global_step}] 保存伪标签可视化失败: {e}")
+                        print(f"[Step {learner.global_step}] 保存失败: {e}")
 
         # Student 模型更新
         if use_pseudo_labels and pseudo_targets is not None and pseudo_targets.shape[0] > 0:
