@@ -490,6 +490,11 @@ class OnlineLearner:
         self.metrics_history = []
         self.step_time_history = []
         self.miou_history = []
+        self.dice_history = []
+        self.pred_confidence_history = []
+        self.pseudo_confidence_history = []
+        self.pseudo_entropy_history = []
+        self.loss_variance_history = []
 
         # 增强版replay buffer
         self.buffer = EnhancedExperienceReplayBuffer(
@@ -778,6 +783,18 @@ def _process_training_frames(selected_frames, learner, args, device):
                         binary_task=args.binary
                     )
 
+                if not hasattr(learner, '_temp_pred_confs'):
+                    learner._temp_pred_confs = []
+                    learner._temp_pseudo_confs = []
+                    learner._temp_entropies = []
+
+                learner._temp_pred_confs.append(student_conf)
+                learner._temp_pseudo_confs.append(teacher_conf)
+
+                teacher_probs = torch.softmax(teacher_logits, dim=1)
+                entropy = -torch.sum(teacher_probs * torch.log(teacher_probs + 1e-10), dim=1).mean().item()
+                learner._temp_entropies.append(entropy)
+
                 # 判断是否使用伪标签
                 use_pseudo_labels = learner.pseudo_label_generator.should_use_pseudo_labels(
                     teacher_conf, student_conf, min_confidence=0.9
@@ -883,7 +900,17 @@ def _process_training_frames(selected_frames, learner, args, device):
                         intersection = (pred_mask == pseudo_targets.long()).float().sum()
                         union = pred_mask.numel()
                         iou = (intersection / union).item() if union > 0 else 0
-                        learner.miou_history.append(iou)
+
+                        if not hasattr(learner, '_temp_ious'):
+                            learner._temp_ious = []
+                            learner._temp_dices = []
+                        learner._temp_ious.append(iou)
+
+                    # Dice Coefficient计算
+                    pred_positive = (pred_mask == 1).float().sum()
+                    target_positive = (pseudo_targets == 1).float().sum()
+                    dice = (2.0 * intersection) / (pred_positive + target_positive + 1e-6)
+                    learner._temp_dices.append(dice.item())
 
                     # 添加到增强版replay buffer
                     if learner.buffer is not None:
@@ -944,6 +971,26 @@ def _process_training_frames(selected_frames, learner, args, device):
 
             except Exception as e:
                 print(f"[Step {learner.global_step}] Replay训练异常: {e}")
+
+    if hasattr(learner, '_temp_dices') and learner._temp_dices:
+        learner.dice_history.append(np.mean(learner._temp_dices))
+        learner._temp_dices = []
+
+    if hasattr(learner, '_temp_ious') and learner._temp_ious:
+        learner.miou_history.append(np.mean(learner._temp_ious))
+        learner._temp_ious = []
+
+    if hasattr(learner, '_temp_pred_confs') and learner._temp_pred_confs:
+        learner.pred_confidence_history.append(np.mean(learner._temp_pred_confs))
+        learner._temp_pred_confs = []
+
+    if hasattr(learner, '_temp_pseudo_confs') and learner._temp_pseudo_confs:
+        learner.pseudo_confidence_history.append(np.mean(learner._temp_pseudo_confs))
+        learner._temp_pseudo_confs = []
+
+    if hasattr(learner, '_temp_entropies') and learner._temp_entropies:
+        learner.pseudo_entropy_history.append(np.mean(learner._temp_entropies))
+        learner._temp_entropies = []
 
     return {
         'successful_updates': successful_updates,
@@ -1019,6 +1066,139 @@ def main():
         plt.savefig(miou_plot_path)
         plt.close()
         print(f"mIoU visualization saved to: {miou_plot_path}")
+
+    if learner.loss_history and len(learner.loss_history) > 1:
+        loss_variance = np.var(learner.loss_history)
+        loss_std = np.std(learner.loss_history)
+        print(f"\n[Training Stability Metrics]")
+        print(f"Loss Variance: {loss_variance:.6f}")
+        print(f"Loss Std Dev: {loss_std:.6f}")
+
+        # 计算滑动窗口方差（更能反映训练过程的稳定性变化）
+        window_size = 20
+        if len(learner.loss_history) >= window_size:
+            rolling_variance = []
+            for i in range(len(learner.loss_history) - window_size + 1):
+                window = learner.loss_history[i:i + window_size]
+                rolling_variance.append(np.var(window))
+            learner.loss_variance_history = rolling_variance
+
+        # 1. Dice Coefficient (单独保存)
+        if learner.dice_history:
+            plt.figure(figsize=(10, 6))
+            steps = np.arange(len(learner.dice_history))
+            plt.plot(steps, learner.dice_history, color='#2E86AB', linewidth=2, alpha=0.8)
+            plt.xlabel('Training Step', fontsize=12)
+            plt.ylabel('Dice Score', fontsize=12)
+            plt.title('Dice Coefficient Over Training', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.dice_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.dice_history):.3f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+            plt.ylim([0, 1])
+            plt.tight_layout()
+            dice_plot_path = os.path.join(output_mgr.get_run_dir(), "dice_coefficient.png")
+            plt.savefig(dice_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Dice Coefficient saved to: {dice_plot_path}")
+
+        # 2. Prediction Confidence (单独保存)
+        if learner.pred_confidence_history:
+            plt.figure(figsize=(10, 6))
+            pred_steps = np.arange(len(learner.pred_confidence_history))
+            plt.plot(pred_steps, learner.pred_confidence_history, color='#A23B72', linewidth=2, alpha=0.8)
+            plt.xlabel('Training Step', fontsize=12)
+            plt.ylabel('Confidence', fontsize=12)
+            plt.title('Student Prediction Confidence (Entropy-based)', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.pred_confidence_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.pred_confidence_history):.3f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+            plt.ylim([0, 1])
+
+            # 添加说明文本
+            conf_text = "Entropy-inverted confidence (lower entropy = higher confidence)"
+            plt.text(0.5, 0.05, conf_text, transform=plt.gca().transAxes,
+                     fontsize=9, ha='center', va='bottom', style='italic',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+            plt.tight_layout()
+            pred_conf_plot_path = os.path.join(output_mgr.get_run_dir(), "prediction_confidence.png")
+            plt.savefig(pred_conf_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Prediction Confidence saved to: {pred_conf_plot_path}")
+
+        # 3. Pseudo-Label Confidence (单独保存，带双y轴)
+        if learner.pseudo_confidence_history:
+            fig, ax1 = plt.subplots(figsize=(10, 6))
+
+            pseudo_steps = np.arange(len(learner.pseudo_confidence_history))
+            ax1.plot(pseudo_steps, learner.pseudo_confidence_history, color='#F18F01',
+                     linewidth=2, alpha=0.8, label='Teacher Confidence')
+            ax1.set_xlabel('Training Step', fontsize=12)
+            ax1.set_ylabel('Confidence', fontsize=12, color='#F18F01')
+            ax1.set_title('Pseudo-Label Quality (Teacher Confidence)', fontsize=14, fontweight='bold')
+            ax1.grid(True, alpha=0.3)
+            ax1.axhline(y=np.mean(learner.pseudo_confidence_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.pseudo_confidence_history):.3f}', linewidth=1.5)
+            ax1.tick_params(axis='y', labelcolor='#F18F01')
+            ax1.set_ylim([0, 1])
+            ax1.legend(loc='upper left', fontsize=10)
+
+            # 如果有熵数据，添加第二个y轴
+            if learner.pseudo_entropy_history:
+                ax2 = ax1.twinx()
+                entropy_steps = np.arange(len(learner.pseudo_entropy_history))
+                ax2.plot(entropy_steps, learner.pseudo_entropy_history, color='#06A77D',
+                         linewidth=2, alpha=0.6, linestyle='--', label='Entropy (lower=better)')
+                ax2.set_ylabel('Entropy', fontsize=12, color='#06A77D')
+                ax2.tick_params(axis='y', labelcolor='#06A77D')
+                ax2.legend(loc='upper right', fontsize=10)
+
+            plt.tight_layout()
+            pseudo_conf_plot_path = os.path.join(output_mgr.get_run_dir(), "pseudo_label_confidence.png")
+            plt.savefig(pseudo_conf_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Pseudo-Label Confidence saved to: {pseudo_conf_plot_path}")
+
+        # 4. Loss Variance (单独保存)
+        if learner.loss_variance_history:
+            plt.figure(figsize=(10, 6))
+            var_steps = np.arange(len(learner.loss_variance_history))
+            plt.plot(var_steps, learner.loss_variance_history, color='#C73E1D', linewidth=2, alpha=0.8)
+            plt.xlabel('Window Position (Step)', fontsize=12)
+            plt.ylabel('Variance', fontsize=12)
+            plt.title('Loss Variance (Training Stability)', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.loss_variance_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.loss_variance_history):.4f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+
+            # 添加稳定性说明文本
+            stability_text = "Lower variance = More stable training"
+            plt.text(0.5, 0.95, stability_text, transform=plt.gca().transAxes,
+                     fontsize=10, ha='center', va='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+            plt.tight_layout()
+            loss_var_plot_path = os.path.join(output_mgr.get_run_dir(), "loss_variance.png")
+            plt.savefig(loss_var_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Loss Variance saved to: {loss_var_plot_path}")
+        elif learner.loss_history:
+            # 如果没有rolling variance，保存整体variance说明
+            plt.figure(figsize=(10, 6))
+            plt.text(0.5, 0.5, f'Overall Loss Variance:\n{np.var(learner.loss_history):.6f}\n\n'
+                               f'Loss Std Dev:\n{np.std(learner.loss_history):.6f}',
+                     transform=plt.gca().transAxes, fontsize=16, ha='center', va='center',
+                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+            plt.title('Loss Variance (Training Stability)', fontsize=14, fontweight='bold')
+            plt.axis('off')
+            plt.tight_layout()
+            loss_var_plot_path = os.path.join(output_mgr.get_run_dir(), "loss_variance.png")
+            plt.savefig(loss_var_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Loss Variance saved to: {loss_var_plot_path}")
 
     loss_history, metrics_history = learner.last_results if hasattr(learner, 'last_results') else ([], [])
     summary = output_mgr.get_run_summary()
