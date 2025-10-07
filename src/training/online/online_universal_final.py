@@ -6,7 +6,6 @@
 3. 完整Replay机制：质量加权采样，经验衰减，多样性保证
 4. 流式处理：生产者-消费者模式，实时视频处理
 """
-import math
 import matplotlib.pyplot as plt
 import cv2
 import argparse
@@ -72,7 +71,7 @@ def parse_args():
     p.add_argument("--viz_samples", type=int, default=20)
 
     # 在线相关
-    p.add_argument("--use_frame_selector", action='store_true', default=True)
+    p.add_argument("--use_frame_selector", action='store_true', default=False)
     p.add_argument("--use_replay_buffer", action='store_true', default=True)
     p.add_argument("--replay_capacity", type=int, default=1000)
     p.add_argument("--frame_selector_threshold", type=float, default=0.85)
@@ -119,6 +118,10 @@ def parse_args():
 
     p.add_argument("--teacher_only", action='store_true', default=False,
                    help="仅使用teacher伪标签（默认使用混合标签）")
+
+    # 新增：是否关闭 EMA 安全机制（默认 False）
+    p.add_argument("--disable_ema_safety", action="store_true", default=False,
+                   help="If set, disable EMA safety mechanism and never skip optimizer step.")
 
     return p.parse_args()
 
@@ -513,8 +516,16 @@ class OnlineLearner:
         except Exception:
             self.best_model_path = os.path.join(project_root, "student_best.pth")
 
-        self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
-                                           cooldown_period=5)
+        # self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
+        #                                    cooldown_period=5)
+
+        # 根据命令行参数决定是否启用 EMA 安全机制
+        if getattr(args, "disable_ema_safety", False):
+            self.ema_safety = None
+            print("[WARN] EMA safety mechanism is DISABLED by --disable_ema_safety")
+        else:
+            self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
+                                               cooldown_period=5)
 
     def _save_best_model_if_improved(self, loss_val):
         if loss_val < self.best_loss:
@@ -856,7 +867,7 @@ def _process_training_frames(selected_frames, learner, args, device):
                         print(f"[Step {learner.global_step}] Teacher质控未通过")
 
                 # 可视化保存（两种模式共用）
-                if learner.global_step % 50 == 0 and pseudo_targets is not None:
+                if frame_item.index % 625 == 0 and pseudo_targets is not None:
                     try:
                         save_dir = args.pseudo_save_dir
                         os.makedirs(save_dir, exist_ok=True)
@@ -910,8 +921,11 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                 torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
 
-                # EMA安全机制检查
-                skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
+                # EMA安全机制检查（如果被禁用则直接不跳过）
+                if learner.ema_safety is not None:
+                    skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
+                else:
+                    skip = False
                 if not skip:
                     learner.optimizer.step()
                     successful_updates += 1
@@ -996,7 +1010,11 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                     torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
 
-                    replay_skip = learner.ema_safety.step(float(replay_loss.item()), learner.model)
+                    if learner.ema_safety is not None:
+                        replay_skip = learner.ema_safety.step(float(replay_loss.item()), learner.model)
+                    else:
+                        replay_skip = False
+
                     if not replay_skip:
                         learner.optimizer.step()
                         print(
@@ -1237,6 +1255,8 @@ def main():
     summary = output_mgr.get_run_summary()
     final_metrics = metrics_history[-1] if metrics_history else {}
     print("--> Enhanced Online Learning Completed <--")
+    if learner.ema_safety is not None:
+        learner.ema_safety.report()
     print(f"Results saved to: {summary.get('run_dir', 'N/A')}")
     if final_metrics:
         print(f"Final Metrics - Loss: {final_metrics.get('val_loss', 0):.4f}, IoU: {final_metrics.get('iou', 0):.4f}")

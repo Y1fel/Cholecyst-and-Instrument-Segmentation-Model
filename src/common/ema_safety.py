@@ -17,6 +17,10 @@ class EMASafetyManager:
         self.cooldown_steps = 0
         self.cooldown_period = cooldown_period
 
+        # === 统计信息 ===
+        self.total_steps = 0       # 调用了 step() 的总次数
+        self.skipped_updates = 0   # 被跳过的次数（触发了安全机制）
+
     def update_ema(self, model):
         for ema_p, p in zip(self.ema_model.parameters(), model.parameters()):
             ema_p.data.mul_(self.ema_alpha).add_(p.data * (1.0 - self.ema_alpha))
@@ -49,15 +53,29 @@ class EMASafetyManager:
         """
         每步训练后调用。返回True表示本步应跳过参数更新（冷却期），False表示可正常更新。
         """
+        # === 统计：每次调用 step 都计数一次 ===
+        self.total_steps += 1
+
         anomaly = self.check_loss_anomaly(loss) or self.check_grad_explosion(model)
         if self.cooldown_steps > 0:
             self.cooldown_steps -= 1
+            self.skipped_updates += 1
             return True  # 冷却期，跳过参数更新
         elif anomaly:
             self.copy_ema_to_model(model)
             self.cooldown_steps = self.cooldown_period
+            self.skipped_updates += 1
             return True  # 进入冷却期，跳过参数更新
         else:
             self.update_ema(model)
             return False  # 正常更新
 
+    def report(self):
+        """打印统计信息"""
+        if self.total_steps == 0:
+            ratio = 0.0
+        else:
+            ratio = self.skipped_updates / self.total_steps
+        print(f"[EMA Summary] Total checks: {self.total_steps}, "
+              f"Skipped updates: {self.skipped_updates}, "
+              f"Skip ratio: {ratio:.2%}")
