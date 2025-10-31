@@ -6,7 +6,6 @@
 3. 完整Replay机制：质量加权采样，经验衰减，多样性保证
 4. 流式处理：生产者-消费者模式，实时视频处理
 """
-import math
 import matplotlib.pyplot as plt
 import cv2
 import argparse
@@ -36,6 +35,7 @@ from src.common.pseudo_label_quality import (
     denoise_pseudo_label, pixel_gate_mask, mask_quality_filter_with_pixel_mask
 )
 from src.common.ema_safety import EMASafetyManager
+from src.common.pseudo_label_generator import PseudoLabelGenerator
 
 # 模型导入
 from src.models.model_zoo import build_model
@@ -71,7 +71,7 @@ def parse_args():
     p.add_argument("--viz_samples", type=int, default=20)
 
     # 在线相关
-    p.add_argument("--use_frame_selector", action='store_true', default=True)
+    p.add_argument("--use_frame_selector", action='store_true', default=False)
     p.add_argument("--use_replay_buffer", action='store_true', default=True)
     p.add_argument("--replay_capacity", type=int, default=1000)
     p.add_argument("--frame_selector_threshold", type=float, default=0.85)
@@ -115,6 +115,13 @@ def parse_args():
     p.add_argument("--denoise_student_pred", action='store_true', default=True, help="对student预测进行去噪处理")
     p.add_argument("--save_pseudo_labels", action='store_true', default=False, help="保存通过质控的伪标签到本地")
     p.add_argument("--pseudo_save_dir", type=str, default=None, help="伪标签保存目录")
+
+    p.add_argument("--teacher_only", action='store_true', default=False,
+                   help="仅使用teacher伪标签（默认使用混合标签）")
+
+    # 新增：是否关闭 EMA 安全机制（默认 False）
+    p.add_argument("--disable_ema_safety", action="store_true", default=False,
+                   help="If set, disable EMA safety mechanism and never skip optimizer step.")
 
     return p.parse_args()
 
@@ -465,7 +472,10 @@ class OnlineLearner:
         self.output_mgr = output_mgr
         self.monitor = monitor
         self.global_frame_idx = 0
-
+        self.pseudo_label_generator = PseudoLabelGenerator(
+            initial_teacher_weight=0.8,
+            min_teacher_weight=0.05
+        )
         self.criterion = nn.BCEWithLogitsLoss() if args.binary else nn.CrossEntropyLoss()
 
         # 优化器
@@ -484,8 +494,13 @@ class OnlineLearner:
         self.visualizer = Visualizer()
         self.loss_history = []
         self.metrics_history = []
-        self.step_time_history = []  # 记录每个step的用时
+        self.step_time_history = []
         self.miou_history = []
+        self.dice_history = []
+        self.pred_confidence_history = []
+        self.pseudo_confidence_history = []
+        self.pseudo_entropy_history = []
+        self.loss_variance_history = []
 
         # 增强版replay buffer
         self.buffer = EnhancedExperienceReplayBuffer(
@@ -501,8 +516,16 @@ class OnlineLearner:
         except Exception:
             self.best_model_path = os.path.join(project_root, "student_best.pth")
 
-        self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
-                                           cooldown_period=5)
+        # self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
+        #                                    cooldown_period=5)
+
+        # 根据命令行参数决定是否启用 EMA 安全机制
+        if getattr(args, "disable_ema_safety", False):
+            self.ema_safety = None
+            print("[WARN] EMA safety mechanism is DISABLED by --disable_ema_safety")
+        else:
+            self.ema_safety = EMASafetyManager(self.model, alpha=0.99, loss_window_size=10, grad_explode_thresh=10.0,
+                                               cooldown_period=5)
 
     def _save_best_model_if_improved(self, loss_val):
         if loss_val < self.best_loss:
@@ -679,7 +702,6 @@ def streaming_online_loop(args, learner, video_fps=25):
                 step_ms = (time.time() - step_t0) * 1000.0
                 recent_step_ms.append(step_ms)
                 learner.step_time_history.append(step_ms)
-
                 if len(recent_step_ms) > 50:
                     recent_step_ms.pop(0)
 
@@ -703,7 +725,7 @@ def streaming_online_loop(args, learner, video_fps=25):
 
             # 检查步数限制
             if int(args.online_steps) > 0 and learner.global_step >= int(args.online_steps):
-                print("[INFO] Reached online_steps limit. Stopping streaming loop.")
+                print(f"[INFO] Reached online_steps limit ({args.online_steps}). Current global_step: {learner.global_step}. Stopping streaming loop.")
                 break
 
     finally:
@@ -752,69 +774,119 @@ def _process_training_frames(selected_frames, learner, args, device):
             except Exception as e:
                 print(f"[Step {learner.global_step}] Student预测去噪异常: {e}")
 
-        # Teacher 伪标签生成 + 质控
+        # 使用新的混合伪标签生成机制 OR 纯teacher伪标签
         pseudo_targets = None
         teacher_confidence = None
-        qc_pass = False
+        student_confidence = None
+        use_pseudo_labels = False
 
         if learner.offline_model is not None:
+            learner.model.eval()
             with torch.no_grad():
-                tlogits = learner.offline_model(img_tensor)
-                if tlogits.shape[1] == 1:
-                    tprobs = torch.sigmoid(tlogits).cpu().numpy()
-                    pseudo_np = (tprobs > 0.5).astype(np.uint8)[:, 0, ...]
-                    teacher_probs_np = tprobs
-                    # 计算teacher置信度
-                    teacher_confidence = float(np.mean(np.max([tprobs, 1 - tprobs], axis=0)))
+                # 获取teacher logits
+                teacher_logits = learner.offline_model(img_tensor)
+
+                # ========== 条件判断：混合标签 or 纯teacher ==========
+                if not args.teacher_only:
+                    # 混合标签模式（原有逻辑）
+                    student_logits = learner.model(img_tensor)
+
+                    hybrid_labels, teacher_conf, student_conf, current_teacher_weight, debug_info = \
+                        learner.pseudo_label_generator.generate_hybrid_labels(
+                            teacher_logits, student_logits,
+                            current_loss=learner.loss_history[-1] if learner.loss_history else None,
+                            binary_task=args.binary
+                        )
+
+                    if not hasattr(learner, '_temp_pred_confs'):
+                        learner._temp_pred_confs = []
+                        learner._temp_pseudo_confs = []
+                        learner._temp_entropies = []
+
+                    learner._temp_pred_confs.append(student_conf)
+                    learner._temp_pseudo_confs.append(teacher_conf)
+
+                    teacher_probs = torch.softmax(teacher_logits, dim=1)
+                    entropy = -torch.sum(teacher_probs * torch.log(teacher_probs + 1e-10), dim=1).mean().item()
+                    learner._temp_entropies.append(entropy)
+
+                    use_pseudo_labels = learner.pseudo_label_generator.should_use_pseudo_labels(
+                        teacher_conf, student_conf, min_confidence=0.9
+                    )
+
+                    if use_pseudo_labels:
+                        if args.binary:
+                            pseudo_targets = hybrid_labels.float().unsqueeze(1)
+                        else:
+                            pseudo_targets = hybrid_labels.long()
+
+                        teacher_confidence = teacher_conf
+                        student_confidence = student_conf
+
+                        print(f"[Step {learner.global_step}] 混合伪标签: teacher={teacher_conf:.3f}, "
+                              f"student={student_conf:.3f}, weight={current_teacher_weight:.3f}")
+                    else:
+                        print(f"[Step {learner.global_step}] 置信度不足，跳过")
+
                 else:
-                    tsoft = torch.softmax(tlogits, dim=1)
-                    tprobs = tsoft.cpu().numpy()
-                    pseudo_np = np.argmax(tprobs, axis=1)
-                    teacher_probs_np = tprobs
-                    # 计算teacher置信度（最大概率的均值）
-                    teacher_confidence = float(np.mean(np.max(tprobs, axis=1)))
+                    # 纯Teacher模式（v4逻辑）
+                    if teacher_logits.shape[1] == 1:
+                        tprobs = torch.sigmoid(teacher_logits).cpu().numpy()
+                        pseudo_np = (tprobs > 0.5).astype(np.uint8)[:, 0, ...]
+                        teacher_probs_np = tprobs
+                        teacher_confidence = float(np.mean(np.max([tprobs, 1 - tprobs], axis=0)))
+                    else:
+                        tsoft = torch.softmax(teacher_logits, dim=1)
+                        tprobs = tsoft.cpu().numpy()
+                        pseudo_np = np.argmax(tprobs, axis=1)
+                        teacher_probs_np = tprobs
+                        teacher_confidence = float(np.mean(np.max(tprobs, axis=1)))
 
-            try:
-                pseudo_np = denoise_pseudo_label(pseudo_np, min_area=100, morph_op='open',
-                                                 morph_structure=np.ones((3, 3)))
-                pixel_masks = pixel_gate_mask(teacher_probs_np, pseudo_np)
-                mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs_np, pseudo_np, pixel_masks)
-                mask_ok = np.asarray(mask_ok).astype(bool).ravel()
-                qc_pass = bool(mask_ok.any())
-            except Exception as e:
-                print(f"[Step {learner.global_step}] 质控异常: {e}")
-                mask_ok = np.array([True], dtype=bool)
-                qc_pass = True
+                    try:
+                        pseudo_np = denoise_pseudo_label(pseudo_np, min_area=100, morph_op='open',
+                                                         morph_structure=np.ones((3, 3)))
+                        pixel_masks = pixel_gate_mask(teacher_probs_np, pseudo_np)
+                        mask_ok = mask_quality_filter_with_pixel_mask(teacher_probs_np, pseudo_np, pixel_masks)
+                        mask_ok = np.asarray(mask_ok).astype(bool).ravel()
+                        use_pseudo_labels = bool(mask_ok.any())
+                    except Exception as e:
+                        print(f"[Step {learner.global_step}] 质控异常: {e}")
+                        mask_ok = np.array([True], dtype=bool)
+                        use_pseudo_labels = True
 
-            if qc_pass:
-                keep_idx = np.where(mask_ok)[0]
-                pseudo_np_kept = pseudo_np[keep_idx]
-                if args.binary:
-                    pseudo_targets = torch.from_numpy(pseudo_np_kept).float().unsqueeze(1).to(device)
-                else:
-                    pseudo_targets = torch.from_numpy(pseudo_np_kept).long().to(device)
+                    if use_pseudo_labels:
+                        keep_idx = np.where(mask_ok)[0]
+                        pseudo_np_kept = pseudo_np[keep_idx]
+                        if args.binary:
+                            pseudo_targets = torch.from_numpy(pseudo_np_kept).float().unsqueeze(1).to(device)
+                        else:
+                            pseudo_targets = torch.from_numpy(pseudo_np_kept).long().to(device)
 
-                # ===== 保存伪标签图和叠加图（每50步保存一次） =====
-                if learner.global_step % 50 == 0:
+                        print(f"[Step {learner.global_step}] Teacher伪标签: conf={teacher_confidence:.3f}")
+                    else:
+                        print(f"[Step {learner.global_step}] Teacher质控未通过")
+
+                # 可视化保存（两种模式共用）
+                if frame_item.index % 625 == 0 and pseudo_targets is not None:
                     try:
                         save_dir = args.pseudo_save_dir
                         os.makedirs(save_dir, exist_ok=True)
 
-                        # 原始图像
-                        img_vis = frame_item.rgb_np  # HxWx3 uint8
-
-                        # 伪标签彩色渲染
+                        img_vis = frame_item.rgb_np
                         cmap = plt.get_cmap("tab10", args.offline_num_classes)
-                        pred_mask = pseudo_np[0] if pseudo_np.ndim == 3 else pseudo_np
-                        colored_mask = cmap(pred_mask / (args.offline_num_classes - 1))[:, :, :3]
+
+                        pred_mask = pseudo_targets[0].detach().cpu().numpy()
+                        if pred_mask.ndim == 3:
+                            pred_mask = pred_mask[0]
+
+                        colored_mask = cmap(pred_mask / max(1, args.offline_num_classes - 1))[:, :, :3]
                         colored_mask = (colored_mask * 255).astype(np.uint8)
 
-                        # 叠加
                         alpha = 0.4
                         overlay = cv2.addWeighted(img_vis, 1 - alpha, colored_mask, alpha, 0)
 
-                        # 保存文件名
-                        base_name = f"frame_{frame_item.index:06d}"
+                        mode_tag = "teacher" if args.teacher_only else "hybrid"
+                        base_name = f"frame_{frame_item.index:06d}_{mode_tag}"
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_original.png"),
                                     cv2.cvtColor(img_vis, cv2.COLOR_RGB2BGR))
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_pseudo.png"),
@@ -822,13 +894,13 @@ def _process_training_frames(selected_frames, learner, args, device):
                         cv2.imwrite(os.path.join(save_dir, f"{base_name}_overlay.png"),
                                     cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
-                        print(f"[INFO] Saved pseudo-label visualization to {save_dir}/{base_name}_overlay.png")
+                        print(f"[INFO] Saved {mode_tag} label: {save_dir}/{base_name}_overlay.png")
 
                     except Exception as e:
-                        print(f"[Step {learner.global_step}] 保存伪标签可视化失败: {e}")
+                        print(f"[Step {learner.global_step}] 保存失败: {e}")
 
         # Student 模型更新
-        if pseudo_targets is not None and pseudo_targets.shape[0] > 0:
+        if use_pseudo_labels and pseudo_targets is not None and pseudo_targets.shape[0] > 0:
             learner.model.train()
             learner.optimizer.zero_grad()
 
@@ -849,8 +921,11 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                 torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
 
-                # EMA安全机制检查
-                skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
+                # EMA安全机制检查（如果被禁用则直接不跳过）
+                if learner.ema_safety is not None:
+                    skip = learner.ema_safety.step(float(loss_tensor.item()), learner.model)
+                else:
+                    skip = False
                 if not skip:
                     learner.optimizer.step()
                     successful_updates += 1
@@ -861,6 +936,7 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                     learner.loss_history.append(loss_val)
 
+                    # 计算当前batch的IoU
                     with torch.no_grad():
                         if args.binary:
                             pred_mask = (torch.sigmoid(out) > 0.5).long()
@@ -871,7 +947,17 @@ def _process_training_frames(selected_frames, learner, args, device):
                         intersection = (pred_mask == pseudo_targets.long()).float().sum()
                         union = pred_mask.numel()
                         iou = (intersection / union).item() if union > 0 else 0
-                        learner.miou_history.append(iou)
+
+                        if not hasattr(learner, '_temp_ious'):
+                            learner._temp_ious = []
+                            learner._temp_dices = []
+                        learner._temp_ious.append(iou)
+
+                    # Dice Coefficient计算
+                    pred_positive = (pred_mask == 1).float().sum()
+                    target_positive = (pseudo_targets == 1).float().sum()
+                    dice = (2.0 * intersection) / (pred_positive + target_positive + 1e-6)
+                    learner._temp_dices.append(dice.item())
 
                     # 添加到增强版replay buffer
                     if learner.buffer is not None:
@@ -924,7 +1010,11 @@ def _process_training_frames(selected_frames, learner, args, device):
 
                     torch.nn.utils.clip_grad_norm_(learner.model.parameters(), max_norm=1.0)
 
-                    replay_skip = learner.ema_safety.step(float(replay_loss.item()), learner.model)
+                    if learner.ema_safety is not None:
+                        replay_skip = learner.ema_safety.step(float(replay_loss.item()), learner.model)
+                    else:
+                        replay_skip = False
+
                     if not replay_skip:
                         learner.optimizer.step()
                         print(
@@ -932,6 +1022,26 @@ def _process_training_frames(selected_frames, learner, args, device):
 
             except Exception as e:
                 print(f"[Step {learner.global_step}] Replay训练异常: {e}")
+
+    if hasattr(learner, '_temp_dices') and learner._temp_dices:
+        learner.dice_history.append(np.mean(learner._temp_dices))
+        learner._temp_dices = []
+
+    if hasattr(learner, '_temp_ious') and learner._temp_ious:
+        learner.miou_history.append(np.mean(learner._temp_ious))
+        learner._temp_ious = []
+
+    if hasattr(learner, '_temp_pred_confs') and learner._temp_pred_confs:
+        learner.pred_confidence_history.append(np.mean(learner._temp_pred_confs))
+        learner._temp_pred_confs = []
+
+    if hasattr(learner, '_temp_pseudo_confs') and learner._temp_pseudo_confs:
+        learner.pseudo_confidence_history.append(np.mean(learner._temp_pseudo_confs))
+        learner._temp_pseudo_confs = []
+
+    if hasattr(learner, '_temp_entropies') and learner._temp_entropies:
+        learner.pseudo_entropy_history.append(np.mean(learner._temp_entropies))
+        learner._temp_entropies = []
 
     return {
         'successful_updates': successful_updates,
@@ -1008,10 +1118,145 @@ def main():
         plt.close()
         print(f"mIoU visualization saved to: {miou_plot_path}")
 
+    if learner.loss_history and len(learner.loss_history) > 1:
+        loss_variance = np.var(learner.loss_history)
+        loss_std = np.std(learner.loss_history)
+        print(f"\n[Training Stability Metrics]")
+        print(f"Loss Variance: {loss_variance:.6f}")
+        print(f"Loss Std Dev: {loss_std:.6f}")
+
+        # 计算滑动窗口方差（更能反映训练过程的稳定性变化）
+        window_size = 20
+        if len(learner.loss_history) >= window_size:
+            rolling_variance = []
+            for i in range(len(learner.loss_history) - window_size + 1):
+                window = learner.loss_history[i:i + window_size]
+                rolling_variance.append(np.var(window))
+            learner.loss_variance_history = rolling_variance
+
+        # 1. Dice Coefficient (单独保存)
+        if learner.dice_history:
+            plt.figure(figsize=(10, 6))
+            steps = np.arange(len(learner.dice_history))
+            plt.plot(steps, learner.dice_history, color='#2E86AB', linewidth=2, alpha=0.8)
+            plt.xlabel('Training Step', fontsize=12)
+            plt.ylabel('Dice Score', fontsize=12)
+            plt.title('Dice Coefficient Over Training', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.dice_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.dice_history):.3f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+            plt.ylim([0, 1])
+            plt.tight_layout()
+            dice_plot_path = os.path.join(output_mgr.get_run_dir(), "dice_coefficient.png")
+            plt.savefig(dice_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Dice Coefficient saved to: {dice_plot_path}")
+
+        # 2. Prediction Confidence (单独保存)
+        if learner.pred_confidence_history:
+            plt.figure(figsize=(10, 6))
+            pred_steps = np.arange(len(learner.pred_confidence_history))
+            plt.plot(pred_steps, learner.pred_confidence_history, color='#A23B72', linewidth=2, alpha=0.8)
+            plt.xlabel('Training Step', fontsize=12)
+            plt.ylabel('Confidence', fontsize=12)
+            plt.title('Student Prediction Confidence (Entropy-based)', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.pred_confidence_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.pred_confidence_history):.3f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+            plt.ylim([0, 1])
+
+            # 添加说明文本
+            conf_text = "Entropy-inverted confidence (lower entropy = higher confidence)"
+            plt.text(0.5, 0.05, conf_text, transform=plt.gca().transAxes,
+                     fontsize=9, ha='center', va='bottom', style='italic',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+            plt.tight_layout()
+            pred_conf_plot_path = os.path.join(output_mgr.get_run_dir(), "prediction_confidence.png")
+            plt.savefig(pred_conf_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Prediction Confidence saved to: {pred_conf_plot_path}")
+
+        # 3. Pseudo-Label Confidence (单独保存，带双y轴)
+        if learner.pseudo_confidence_history:
+            fig, ax1 = plt.subplots(figsize=(10, 6))
+
+            pseudo_steps = np.arange(len(learner.pseudo_confidence_history))
+            ax1.plot(pseudo_steps, learner.pseudo_confidence_history, color='#F18F01',
+                     linewidth=2, alpha=0.8, label='Teacher Confidence')
+            ax1.set_xlabel('Training Step', fontsize=12)
+            ax1.set_ylabel('Confidence', fontsize=12, color='#F18F01')
+            ax1.set_title('Pseudo-Label Quality (Teacher Confidence)', fontsize=14, fontweight='bold')
+            ax1.grid(True, alpha=0.3)
+            ax1.axhline(y=np.mean(learner.pseudo_confidence_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.pseudo_confidence_history):.3f}', linewidth=1.5)
+            ax1.tick_params(axis='y', labelcolor='#F18F01')
+            ax1.set_ylim([0, 1])
+            ax1.legend(loc='upper left', fontsize=10)
+
+            # 如果有熵数据，添加第二个y轴
+            if learner.pseudo_entropy_history:
+                ax2 = ax1.twinx()
+                entropy_steps = np.arange(len(learner.pseudo_entropy_history))
+                ax2.plot(entropy_steps, learner.pseudo_entropy_history, color='#06A77D',
+                         linewidth=2, alpha=0.6, linestyle='--', label='Entropy (lower=better)')
+                ax2.set_ylabel('Entropy', fontsize=12, color='#06A77D')
+                ax2.tick_params(axis='y', labelcolor='#06A77D')
+                ax2.legend(loc='upper right', fontsize=10)
+
+            plt.tight_layout()
+            pseudo_conf_plot_path = os.path.join(output_mgr.get_run_dir(), "pseudo_label_confidence.png")
+            plt.savefig(pseudo_conf_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Pseudo-Label Confidence saved to: {pseudo_conf_plot_path}")
+
+        # 4. Loss Variance (单独保存)
+        if learner.loss_variance_history:
+            plt.figure(figsize=(10, 6))
+            var_steps = np.arange(len(learner.loss_variance_history))
+            plt.plot(var_steps, learner.loss_variance_history, color='#C73E1D', linewidth=2, alpha=0.8)
+            plt.xlabel('Window Position (Step)', fontsize=12)
+            plt.ylabel('Variance', fontsize=12)
+            plt.title('Loss Variance (Training Stability)', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=np.mean(learner.loss_variance_history), color='r', linestyle='--',
+                        label=f'Mean: {np.mean(learner.loss_variance_history):.4f}', linewidth=1.5)
+            plt.legend(fontsize=10)
+
+            # 添加稳定性说明文本
+            stability_text = "Lower variance = More stable training"
+            plt.text(0.5, 0.95, stability_text, transform=plt.gca().transAxes,
+                     fontsize=10, ha='center', va='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+            plt.tight_layout()
+            loss_var_plot_path = os.path.join(output_mgr.get_run_dir(), "loss_variance.png")
+            plt.savefig(loss_var_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Loss Variance saved to: {loss_var_plot_path}")
+        elif learner.loss_history:
+            # 如果没有rolling variance，保存整体variance说明
+            plt.figure(figsize=(10, 6))
+            plt.text(0.5, 0.5, f'Overall Loss Variance:\n{np.var(learner.loss_history):.6f}\n\n'
+                               f'Loss Std Dev:\n{np.std(learner.loss_history):.6f}',
+                     transform=plt.gca().transAxes, fontsize=16, ha='center', va='center',
+                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+            plt.title('Loss Variance (Training Stability)', fontsize=14, fontweight='bold')
+            plt.axis('off')
+            plt.tight_layout()
+            loss_var_plot_path = os.path.join(output_mgr.get_run_dir(), "loss_variance.png")
+            plt.savefig(loss_var_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"[Visualization] Loss Variance saved to: {loss_var_plot_path}")
+
     loss_history, metrics_history = learner.last_results if hasattr(learner, 'last_results') else ([], [])
     summary = output_mgr.get_run_summary()
     final_metrics = metrics_history[-1] if metrics_history else {}
     print("--> Enhanced Online Learning Completed <--")
+    if learner.ema_safety is not None:
+        learner.ema_safety.report()
     print(f"Results saved to: {summary.get('run_dir', 'N/A')}")
     if final_metrics:
         print(f"Final Metrics - Loss: {final_metrics.get('val_loss', 0):.4f}, IoU: {final_metrics.get('iou', 0):.4f}")
