@@ -1,0 +1,76 @@
+# ===============================
+# KD-Student (6-class, video-aware)
+# python src/training/offline/train_offline_universal.py --config configs/offline/6classes/kd_student_config_6class.yaml --data_root data/seg8k
+# python scripts/generate_kd_visualizations.py --experiment_dir ‘’
+# 
+# ===============================
+
+# --- 基础 ---
+experiment_regime: "KD-Student-6Class"
+experiment_notes: "6-class KD; Teacher=UNet++; video-aware split; CE+Dice+KD"
+epochs: 50
+batch_size: 6
+img_size: 384
+num_classes: 6
+num_workers: 0
+
+# --- 分类配置 ---
+classification_scheme: "6class"
+exclude_background_metrics: true
+
+# --- 优化与调度 ---
+optimizer: "adamw"
+lr: 0.0003
+weight_decay: 0.0005
+scheduler: "cosine_warmup"
+
+# --- 数据/划分 ---
+split_strategy: "video_aware"
+val_ratio: 0.25
+monitor_interval: 5
+apply_fov_mask: true
+
+# --- 增强 ---
+augment: true
+flip_prob: 0.6
+rotation_degree: 15
+
+# --- 知识蒸馏 ---
+enable_distillation: true
+teacher_model: "unet_plus_plus"
+teacher_checkpoint: "outputs/(6-class final) unet_plus_plus_20251001_025330/checkpoints/unet_plus_plus_best.pth"
+student_model: "adaptive_unet"
+
+distill_temperature: 5.0
+distill_alpha: 0.5
+distill_beta: 0.5
+distill_feature_weight: 0.1
+
+# --- 监控/保存/早停 ---
+save_best_only: true
+val_interval: 1
+save_interval: 2
+early_stopping: true
+patience: 10
+loss_threshold: 0.02
+loss_degradation_threshold: 0.05
+
+# --- 高级损失函数配置 ---
+loss_type: "combined"
+dice_weight: 0.4
+use_focal_loss: false
+focal_alpha: 1.0
+focal_gamma: 2.0
+label_smoothing: 0.05
+auto_class_weights: true
+class_weight_sample_ratio: 0.10
+
+# --- 早停策略 ---
+early_stopping_metric: "miou"
+
+# --- 可视化/证据包 ---
+save_viz: true
+viz_samples: 12
+enable_gpu_monitor: true
+generate_evidence_package: true
+evidence_experiment_name: "KD_Student_6Class_50Epochs"

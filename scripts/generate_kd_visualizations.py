@@ -5,7 +5,7 @@ Generate specialized visualization charts for knowledge distillation training, s
 All charts are saved as separate files for easy viewing and analysis
 
 Usage:
-python scripts/generate_kd_visualizations.py --experiment_dir outputs/distill_unet_plus_plus_to_adaptive_unet_20250920_180040
+python scripts/generate_kd_visualizations.py --experiment_dir "outputs/(6-class final student)distill_unet_plus_plus_to_adaptive_unet_20251005_042739"
 """
 
 import os
