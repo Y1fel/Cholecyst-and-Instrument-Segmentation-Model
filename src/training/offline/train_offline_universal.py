@@ -10,6 +10,7 @@ import os, argparse, yaml, torch, sys, json
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
+from contextlib import nullcontext
 
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
@@ -138,8 +139,31 @@ def parse_args():
     
     # 学习率调度
     p.add_argument("--scheduler", type=str, default="cosine",
-                   choices=["none", "step", "cosine", "plateau"], help="Learning rate scheduler type")
+                   choices=["none", "step", "cosine", "plateau", "cosine_warmup"], help="Learning rate scheduler type")
     p.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for optimizer")
+
+    # 性能优化
+    p.add_argument("--amp", action='store_true', default=True,
+                   help="Enable automatic mixed precision training on CUDA")
+    p.add_argument("--amp_dtype", type=str, default="fp16", choices=["fp16", "bf16"],
+                   help="AMP dtype on CUDA")
+    p.add_argument("--channels_last", action='store_true', default=False,
+                   help="Use channels_last memory format for potentially faster convolution")
+    p.add_argument("--compile_model", action='store_true', default=False,
+                   help="Enable torch.compile for potential speedup on PyTorch 2.x")
+    p.add_argument("--compile_mode", type=str, default="max-autotune",
+                   choices=["default", "reduce-overhead", "max-autotune"],
+                   help="Compilation optimization mode")
+
+    # 稳定性优化（常可带来精度提升）
+    p.add_argument("--max_grad_norm", type=float, default=1.0,
+                   help="Gradient clipping max norm; <=0 disables clipping")
+
+    # DataLoader吞吐优化
+    p.add_argument("--persistent_workers", action='store_true', default=True,
+                   help="Keep DataLoader workers alive between epochs")
+    p.add_argument("--prefetch_factor", type=int, default=2,
+                   help="Number of batches prefetched by each worker")
 
     # 数据增强
     p.add_argument("--augment", action='store_true', default=True, help="Enable data augmentation")
@@ -824,7 +848,7 @@ def create_scheduler(optimizer, args):
 
 # one epoch training
 def train_one_epoch(
-    model, loader, criterion, optimizer, device, monitor, epoch_index, args, teacher_model=None
+    model, loader, criterion, optimizer, device, monitor, epoch_index, args, teacher_model=None, scaler=None, amp_dtype=torch.float16
 ):
     model.train()
     if teacher_model is not None:
@@ -836,43 +860,58 @@ def train_one_epoch(
     total = len(loader)
 
     for step, (images, masks) in enumerate(loader):
+        if args.channels_last:
+            images = images.contiguous(memory_format=torch.channels_last)
         images = images.to(device, non_blocking=True) # [path, 3, H, W]
         masks  = masks.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
         
 
+        amp_ctx = torch.autocast(device_type='cuda', dtype=amp_dtype) if scaler is not None else nullcontext()
+
         # Forward pass: images -> logits
-        if args.enable_distillation and teacher_model is not None:
-            with torch.no_grad():
-                teacher_logits = teacher_model(images)
-            
-            student_logits = model(images)
+        with amp_ctx:
+            if args.enable_distillation and teacher_model is not None:
+                with torch.no_grad():
+                    teacher_logits = teacher_model(images)
+                
+                student_logits = model(images)
 
-            # KD 通道对齐断言：防止 Teacher/Student 通道不一致导致蒸馏错误
-            assert teacher_logits.shape[1] == student_logits.shape[1] == args.num_classes, \
-                f"Teacher/Student/num_classes不一致: Teacher={teacher_logits.shape} vs Student={student_logits.shape} vs num_classes={args.num_classes}"
+                # KD 通道对齐断言：防止 Teacher/Student 通道不一致导致蒸馏错误
+                assert teacher_logits.shape[1] == student_logits.shape[1] == args.num_classes, \
+                    f"Teacher/Student/num_classes不一致: Teacher={teacher_logits.shape} vs Student={student_logits.shape} vs num_classes={args.num_classes}"
 
-            # 使用蒸馏损失
-            loss_dict = criterion(student_logits, teacher_logits, masks)
-            loss = loss_dict['total_loss']
+                # 使用蒸馏损失
+                loss_dict = criterion(student_logits, teacher_logits, masks)
+                loss = loss_dict['total_loss']
 
-            running_distill_loss += loss_dict['distill_loss'].item() * images.size(0)
-            running_task_loss += loss_dict['task_loss'].item() * images.size(0)
+                running_distill_loss += loss_dict['distill_loss'].item() * images.size(0)
+                running_task_loss += loss_dict['task_loss'].item() * images.size(0)
 
-        else:
-            logits = model(images)
-            if args.binary:
-                target = masks.float()
-                if target.dim() == 3:
-                    target = target.unsqueeze(1)
-                loss = criterion(logits, target)
             else:
-                targets = masks.long()
-                loss = criterion(logits, targets)
-        
-        loss.backward()
-        optimizer.step()
+                logits = model(images)
+                if args.binary:
+                    target = masks.float()
+                    if target.dim() == 3:
+                        target = target.unsqueeze(1)
+                    loss = criterion(logits, target)
+                else:
+                    targets = masks.long()
+                    loss = criterion(logits, targets)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if args.max_grad_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if args.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            optimizer.step()
 
         running_loss += loss.item() * images.size(0)
 
@@ -934,9 +973,22 @@ def validate(model, loader, criterion, device, args):
 
     if args.binary:
         evaluator = Evaluator(device=device, threshold=0.5)
+        if args.amp and device == "cuda":
+            amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+            with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                return evaluator.evaluate(model, loader, val_criterion)
         return evaluator.evaluate(model, loader, val_criterion)
     else:
         evaluator = Evaluator(device=device)
+        if args.amp and device == "cuda":
+            amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+            with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                return evaluator.evaluate_multiclass(
+                    model, loader, val_criterion,
+                    num_classes = args.num_classes,
+                    ignore_index = 255,
+                    exclude_metric_classes = exclude_metric_classes
+                )
         return evaluator.evaluate_multiclass(
             model, loader, val_criterion,
             num_classes = args.num_classes,
@@ -1172,6 +1224,14 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+        print("Performance tuning: cuDNN benchmark enabled, matmul precision=high")
+
     # train monitor
     monitor = TrainMonitor(enable_gpu_monitor=args.enable_gpu_monitor)
     monitor.start_timing()
@@ -1337,8 +1397,16 @@ def main():
         val_dataset.augment = False
         print(f"[DATASET] Validation augmentation disabled")
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    dataloader_kwargs = {
+        "num_workers": args.num_workers,
+        "pin_memory": (device == "cuda")
+    }
+    if args.num_workers > 0:
+        dataloader_kwargs["persistent_workers"] = args.persistent_workers
+        dataloader_kwargs["prefetch_factor"] = args.prefetch_factor
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **dataloader_kwargs)
+    val_loader   = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, **dataloader_kwargs)
     
     print(f"✅ Data Split Complete ({args.split_strategy}):")
     print(f"   Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
@@ -1575,6 +1643,9 @@ def main():
 
         # Train the Student model primarily
         model = student_model
+
+        if args.channels_last:
+            teacher_model = teacher_model.to(memory_format=torch.channels_last)
     else:
         # 原有的单模型训练模式
         print(f"=== Standard Training Mode ===")
@@ -1592,6 +1663,26 @@ def main():
             criterion = create_advanced_loss_function(args, full_dataset, device)
             
         teacher_model = None  # 标准模式下没有Teacher模型
+
+    if args.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+        print("Performance tuning: channels_last memory format enabled")
+
+    if args.compile_model:
+        if hasattr(torch, "compile"):
+            try:
+                model = torch.compile(model, mode=args.compile_mode)
+                print(f"Performance tuning: torch.compile enabled (mode={args.compile_mode})")
+            except Exception as e:
+                print(f"[WARN] torch.compile failed, fallback to eager mode: {e}")
+        else:
+            print("[WARN] torch.compile not available in current PyTorch version")
+
+    amp_enabled = bool(args.amp and device == "cuda")
+    amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    if amp_enabled:
+        print(f"Performance tuning: AMP enabled ({args.amp_dtype})")
 
     # Optimizer and Scheduler
     optimizer = create_optimizer(model, args)
@@ -1644,7 +1735,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         # Train for one epoch
         if args.enable_distillation:
-            train_results = train_one_epoch(model, train_loader, criterion, optimizer, device, monitor, epoch, args, teacher_model)
+            train_results = train_one_epoch(model, train_loader, criterion, optimizer, device, monitor, epoch, args, teacher_model, scaler=scaler, amp_dtype=amp_dtype)
             avg_train = train_results['total_loss']
             
             # 收集蒸馏指标
@@ -1652,7 +1743,7 @@ def main():
             distillation_metrics['task_loss'].append(train_results['task_loss'])
             distillation_metrics['distill_loss'].append(train_results['distill_loss'])
         else:
-            avg_train = train_one_epoch(model, train_loader, criterion, optimizer, device, monitor, epoch, args)
+            avg_train = train_one_epoch(model, train_loader, criterion, optimizer, device, monitor, epoch, args, scaler=scaler, amp_dtype=amp_dtype)
 
         print(f"Epoch [{epoch + 1}/{args.epochs}], Train Loss: {avg_train:.4f}")
 
